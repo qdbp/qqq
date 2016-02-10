@@ -32,14 +32,15 @@ class SQLiteDB:
                              .format(key, self.db_fn))
 
         try:
-            print(self.c.description)
+            # print(self.c.description)
             pk_raw = PK_RE.findall(out)[0]
         except IndexError:
             raise ValueError("no primary key in table {}".format(out))
-        
-        pk = tuple(pk_raw.split(','))
-        return SQLiteTable(self.conn, self.c, key, pk)
 
+        pk = tuple(t.strip() for t in pk_raw.split(','))
+        return SQLiteTable(self.db_fn, self.conn, self.c, key, pk)
+
+    # TODO: deprecated
     def _insert_raw(self, tab, d, rep=True):
         repl = 'OR REPLACE ' if rep else ''
         ins = '(' + ','.join('?'*len(d)) + ')'
@@ -48,11 +49,18 @@ class SQLiteDB:
 
 
 class SQLiteTable:
-    def __init__(self, conn, c, tabn, pk, l):
+    """
+    Class managing a single table of a sqlite database.
+
+    Exposes a dictionary-like interface, with tuples of the primary
+    keys as keys, and the remaining columns as values
+    """
+    def __init__(self, db_fn, conn, c, tabn, pk):
         self.conn = conn
         self.c = c
         self.tabn = tabn
         self.pk = pk
+        self.db_fn = db_fn
 
     def _check_key(self, key):
         if not len(key) == len(self.pk):
@@ -61,19 +69,28 @@ class SQLiteTable:
 
     def __getitem__(self, key):
         self._check_key(key)
+        for i in self.pk:
+            print(i)
         exe = ('SELECT * FROM {} WHERE '.format(self.tabn) +
                ' AND '.join('{}=:{}'.format(i, i)
                             for i in self.pk))
+        print(exe)
         self.c.execute(exe, dict(zip(self.pk, key)))
         return self.c.fetchall()
 
+    def __len__(self):
+        self.c.execute('SELECT * from {}'.format(self.tabn))
+        return len(self.c.fetchall())
+
     def __setitem__(self, key, value):
-        pass 
-        # self._check_key(key)
-        # exe = ('INSERT OR REPLACE INTO {} VALUES '.format(self.tabn) +
-        #        ' AND '.join('{}=:{}'.format(i, i)
-        #                     for i in self.pk))
-        # pass
+        self._check_key(key)
+        exe = ('INSERT OR REPLACE INTO {} VALUES ('.format(self.tabn) +
+               ','.join(['?']*(len(key) + len(value))) + ')', key+value)
+        self.c.execute(*exe)
+
+    def __str__(self):
+        return "{}: TABLE {} [PRIMARY KEYS {}]"\
+               .format(self.db_fn, self.tabn, self.pk)
 
 
 if __name__ == "__main__":
@@ -83,6 +100,6 @@ if __name__ == "__main__":
     except AssertionError:
         pass
     with SQLiteDB('test.db') as tdb:
-        t = tdb['test_table_a']
-        out = t[(3,)]
-        print(out)
+        t = tdb['test_table_c']
+        print(t)
+        print(len(t))
