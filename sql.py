@@ -16,6 +16,7 @@ class SQLiteDB:
 
     def __enter__(self):
         self.conn = sq3.connect(self.db_fn)
+        self.conn.row_factory = sq3.Row
         self.c = self.conn.cursor()
         return self
 
@@ -188,5 +189,5 @@ if __name__ == "__main__":
 
         # check iteration
         for row in t:
-            print(row)
+            print(tuple(row))
         print('good iteration')
