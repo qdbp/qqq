@@ -9,9 +9,10 @@ class SQLiteDB:
     """ wrapper class around sq3ite databases, encapsulating
         operations common to any stateful database access """
 
-    def __init__(self, db_fn):
+    def __init__(self, db_fn, strict=False):
         self.db_fn = db_fn
         assert osp.isfile(db_fn)
+        self.strict=strict
 
     def __enter__(self):
         self.conn = sq3.connect(self.db_fn)
@@ -38,7 +39,8 @@ class SQLiteDB:
             raise ValueError("no primary key in table {}".format(out))
 
         pk = tuple(t.strip() for t in pk_raw.split(','))
-        return SQLiteTable(self.db_fn, self.conn, self.c, key, pk)
+        return SQLiteTable(self.db_fn, self.conn, self.c, key, pk,
+                           strict=self.strict)
 
     # TODO: deprecated
     def _insert_raw(self, tab, d, rep=True):
@@ -58,7 +60,8 @@ class SQLiteTable:
     Exposes a dictionary-like interface, with tuples of the primary
     keys as keys, and the remaining columns as values
     """
-    def __init__(self, db_fn, conn, c, tabn, pk):
+    def __init__(self, db_fn, conn, c, tabn, pk,
+                 strict=False):
         self.conn = conn
         self.c = c
         self.tabn = tabn
@@ -69,6 +72,10 @@ class SQLiteTable:
         self.colw = len(self.c.description)
 
         self._iter_list = iter([])
+
+    def _row_from_kv(self, key, value):
+        # TODO: arbitrarily-positioned pks
+        return key + value
 
     def _check_row(self, row):
         assert len(row) == self.colw,\
@@ -84,8 +91,6 @@ class SQLiteTable:
 
     def __getitem__(self, key):
         self._check_key(key)
-        for i in self.pk:
-            print(i)
         exe = ('SELECT * FROM {} WHERE '.format(self.tabn) +
                ' AND '.join('{}=:{}'.format(i, i)
                             for i in self.pk))
@@ -93,10 +98,7 @@ class SQLiteTable:
         return self.c.fetchall()
 
     def __setitem__(self, key, value):
-        self._check_key(key)
-        exe = ('INSERT OR REPLACE INTO {} VALUES ('.format(self.tabn) +
-               ','.join(['?']*(len(key) + len(value))) + ')', key+value)
-        self.c.execute(*exe)
+        self.append(self._row_from_kv(key, value))
 
     def __delitem__(self, key):
         self._check_key(key)
@@ -107,7 +109,11 @@ class SQLiteTable:
     def __add__(self, rows):
         assert len(rows) > 0
         for row in rows:
-            self.append(row)
+            try:
+                self.append(row)
+            except sq3.IntegrityError as e:
+                if self.strict:
+                    raise e
         return self
 
     def append(self, row):
