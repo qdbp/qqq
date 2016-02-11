@@ -67,6 +67,7 @@ class SQLiteTable:
         self.tabn = tabn
         self.pk = pk
         self.db_fn = db_fn
+        self.strict = strict
 
         self.c.execute('SELECT * FROM {}'.format(self.tabn))
         self.colw = len(self.c.description)
