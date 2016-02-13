@@ -6,7 +6,7 @@ PK_RE = re.compile(r'PRIMARY KEY\((.*?)\)')
 
 
 class SQLiteDB:
-    """ wrapper class around sq3ite databases, encapsulating
+    """ wrapper class around sqlite databases, encapsulating
         operations common to any stateful database access """
 
     def __init__(self, db_fn, strict=False):
@@ -97,7 +97,7 @@ class SQLiteTable:
                ' AND '.join('{}=:{}'.format(i, i)
                             for i in self.pk))
         self.c.execute(exe, dict(zip(self.pk, key)))
-        return self.c.fetchall()
+        return self.c.fetchall()[0]
 
     def __setitem__(self, key, value):
         self.append(self._row_from_kv(key, value))
