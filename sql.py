@@ -97,7 +97,10 @@ class SQLiteTable:
                ' AND '.join('{}=:{}'.format(i, i)
                             for i in self.pk))
         self.c.execute(exe, dict(zip(self.pk, key)))
-        return self.c.fetchall()[0]
+        try:
+            return self.c.fetchall()[0]
+        except IndexError:
+            raise KeyError('primary key {} not in table'.format(key))
 
     def __setitem__(self, key, value):
         self.append(self._row_from_kv(key, value))
