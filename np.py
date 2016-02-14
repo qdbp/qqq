@@ -41,7 +41,10 @@ def unsl_window(a, axis=0):
     Cannot recover samples trimmed by sl_window.
     """
 
-    osh = a.shape[0] * a.shape[axis+1]
+    osh = list(a.shape[1:])
+    osh[axis] *= a.shape[0]
+    osh = tuple(osh)
+
     ost = a.strides[1:]
 
     out = as_strided(a, osh, ost)
