@@ -34,6 +34,21 @@ def sl_window(a, w, s, axis=0):
     return out
 
 
+def unsl_window(a, axis=0):
+    """
+    Undoes the action of sl_window to the extent possible.
+
+    Cannot recover samples trimmed by sl_window.
+    """
+
+    osh = a.shape[0] * a.shape[axis+1]
+    ost = a.strides[1:]
+
+    out = as_strided(a, osh, ost)
+
+    return out
+
+
 def ttsplit(arrs, f=0.2, align=0, shf_train=True, shf_test=False):
     """ Does a test-train split for multiple arrays.
 

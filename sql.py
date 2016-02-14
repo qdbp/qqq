@@ -91,6 +91,9 @@ class SQLiteTable:
     def _getall(self):
         self.c.execute('SELECT * from {}'.format(self.tabn))
 
+    def __getattr__(self, key):
+        return self.__getitem__(key)
+
     def __getitem__(self, key):
         self._check_key(key)
         exe = ('SELECT * FROM {} WHERE '.format(self.tabn) +
