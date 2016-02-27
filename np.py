@@ -47,7 +47,7 @@ def unsl_window(a, axis=0):
 
     ost = a.strides[1:]
 
-    out = as_strided(a, osh, ost)
+    out = as_strided(a, shape=osh, strides=ost)
 
     return out
 

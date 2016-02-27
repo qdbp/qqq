@@ -105,6 +105,17 @@ class SQLiteTable:
         except IndexError:
             raise KeyError('primary key {} not in table'.format(key))
 
+    def get(self, key, *args):
+        try:
+            return self[key]
+        except KeyError:
+            if not args:
+                raise
+            elif len(args) > 1:
+                raise ValueError('too many arguments')
+            else:
+                return args[0]
+
     def __setitem__(self, key, value):
         self.append(self._row_from_kv(key, value))
 
