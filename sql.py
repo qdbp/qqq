@@ -85,6 +85,8 @@ class SQLiteTable:
             .format(len(row), self.colw)
 
     def _check_key(self, key):
+        if not isinstance(key, tuple):
+            key = (key,)
         assert len(key) == len(self.pk),\
             'key length must correspond to primary key {}'.format(self.pk)
 
