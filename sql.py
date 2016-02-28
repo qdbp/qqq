@@ -114,6 +114,13 @@ class SQLiteTable:
                ' AND '.join('{}=:{}'.format(i, i) for i in self.pk))
         self.c.execute(exe, dict(zip(self.pk, key)))
 
+    def __contains__(self, key):
+        try:
+            self[key]
+            return True
+        except KeyError:
+            return False
+
     def get_where(self, where):
         exe = ('SELECT * FROM {} WHERE '.format(self.tabn) +
                ' AND '.join('{}{}:{}'.format(i, j, i) for i, j, k in where))
