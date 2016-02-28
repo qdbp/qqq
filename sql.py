@@ -85,11 +85,8 @@ class SQLiteTable:
             .format(len(row), self.colw)
 
     def _check_key(self, key):
-        if not isinstance(key, tuple):
-            key = (key,)
         assert len(key) == len(self.pk),\
             'key length must correspond to primary key {}'.format(self.pk)
-        return key
 
     def _getall(self):
         self.c.execute('SELECT * from {}'.format(self.tabn))
@@ -98,7 +95,7 @@ class SQLiteTable:
         return self.__getitem__(key)
 
     def __getitem__(self, key):
-        key = self._check_key(key)
+        self._check_key(key)
         exe = ('SELECT * FROM {} WHERE '.format(self.tabn) +
                ' AND '.join('{}=:{}'.format(i, i)
                             for i in self.pk))
@@ -108,25 +105,20 @@ class SQLiteTable:
         except IndexError:
             raise KeyError('primary key {} not in table'.format(key))
 
-    def get(self, key, *args):
-        try:
-            return self[key]
-        except KeyError:
-            if not args:
-                raise
-            elif len(args) > 1:
-                raise ValueError('too many arguments')
-            else:
-                return args[0]
-
     def __setitem__(self, key, value):
         self.append(self._row_from_kv(key, value))
 
     def __delitem__(self, key):
-        key = self._check_key(key)
+        self._check_key(key)
         exe = ('DELETE FROM {} WHERE '.format(self.tabn) +
                ' AND '.join('{}=:{}'.format(i, i) for i in self.pk))
         self.c.execute(exe, dict(zip(self.pk, key)))
+
+    def get_where(self, where):
+        exe = ('SELECT * FROM {} WHERE '.format(self.tabn) +
+               ' AND '.join('{}{}:{}'.format(i, j, i) for i, j, k in where))
+        self.c.execute(exe, dict(zip([i for i, j, k in where],
+                                     [k for i, j, k in where])))
 
     def __add__(self, rows):
         assert len(rows) > 0
