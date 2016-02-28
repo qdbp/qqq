@@ -89,6 +89,7 @@ class SQLiteTable:
             key = (key,)
         assert len(key) == len(self.pk),\
             'key length must correspond to primary key {}'.format(self.pk)
+        return key
 
     def _getall(self):
         self.c.execute('SELECT * from {}'.format(self.tabn))
@@ -97,7 +98,7 @@ class SQLiteTable:
         return self.__getitem__(key)
 
     def __getitem__(self, key):
-        self._check_key(key)
+        key = self._check_key(key)
         exe = ('SELECT * FROM {} WHERE '.format(self.tabn) +
                ' AND '.join('{}=:{}'.format(i, i)
                             for i in self.pk))
@@ -122,7 +123,7 @@ class SQLiteTable:
         self.append(self._row_from_kv(key, value))
 
     def __delitem__(self, key):
-        self._check_key(key)
+        key = self._check_key(key)
         exe = ('DELETE FROM {} WHERE '.format(self.tabn) +
                ' AND '.join('{}=:{}'.format(i, i) for i in self.pk))
         self.c.execute(exe, dict(zip(self.pk, key)))
