@@ -124,6 +124,12 @@ class SQLiteTable:
         except KeyError:
             return False
 
+    def get(self, key, alt):
+        try:
+            return self[key]
+        except KeyError:
+            return alt
+
     def get_where(self, where):
         exe = ('SELECT * FROM {} WHERE '.format(self.tabn) +
                ' AND '.join('{}{}:{}'.format(i, j, i) for i, j, k in where))
