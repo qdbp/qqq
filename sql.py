@@ -132,9 +132,8 @@ class SQLiteTable:
 
     def get_where(self, where):
         exe = ('SELECT * FROM {} WHERE '.format(self.tabn) +
-               ' AND '.join('{}{}:{}'.format(i, j, i) for i, j, k in where))
-        self.c.execute(exe, dict(zip([i for i, j, k in where],
-                                     [k for i, j, k in where])))
+               ' AND '.join('{}{}?'.format(i, j) for i, j, k in where))
+        self.c.execute(exe, (k for i, j, k in where))
         return self.c.fetchall()
 
     def __add__(self, rows):
