@@ -69,7 +69,7 @@ def scraper(get_func, args, process_func, max_workers=64, sleep=0.05):
         while True:
             try:
                 process_func(q.get_nowait())
-            except que.QueueEmpty:
+            except que.Empty:
                 if all(f.done() for f in futs):
                     return
                 else:
