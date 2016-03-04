@@ -1,9 +1,22 @@
 import concurrent.futures as cfu
+from io import StringIO
 import os.path as osp
 import pickle as pkl
 import queue as que
-import sqlite3 as sql
+import sys
 import time
+
+
+def wr(*args):
+    '''
+    Convenience function to print something in the style of
+    `sys.stdout.write(something+'\r')
+    '''
+
+    s = StringIO()
+    print(*args, file=s)
+    sys.stdout.write(s+'\r')
+    del s
 
 
 def p(fn, f, args=(), kwargs=None, d='.', ow=False, owa=(), owk=None):
