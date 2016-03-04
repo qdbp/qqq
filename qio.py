@@ -15,7 +15,8 @@ def wr(*args):
 
     s = StringIO()
     print(*args, file=s)
-    sys.stdout.write(s+'\r')
+    sys.stdout.write(s.getvalue()+'\r')
+    sys.stdout.flush()
     del s
 
 
