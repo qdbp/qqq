@@ -1,9 +1,14 @@
+import concurrent.futures as cfu
+import itertools as itr
+import threading
+
 import numpy as np
 import numpy.random as npr
 
 
 def iter_batches(data, bs, rand=True, excl_func=None,
-                 trans=None, ret=False, wgh_key='y', seqlen=1):
+                 trans=None, ret=False, wgh_key='y', seqlen=1,
+                 workers=8):
     """ Given a dictionary of lists of lists, each list of lists
         with all lists of lists having the same length, and
         all ith sublists in the list of lists having the same length.
@@ -85,59 +90,49 @@ def iter_batches(data, bs, rand=True, excl_func=None,
     batch_w = {wgh_key: np.zeros(bs)}
     wgh = get_wgh(data[wgh_key])
 
-    def do_sample(ix, jx):
-        pass
-        
+    def do_sample(args):
+        bx, ix, jx, sx = args
+        for k, v in data.items():
+            d = v[ix][jx]
+            if seqlen > 1:
+                batch[k][bx, sx] = d if k not in trans else trans[k](d)
+            else:
+                batch[k][bx] = d if k not in trans else trans[k](d)
+
+        if bx == 0:
+            batch_w[wgh_key][bx] = wgh[np.argmax(data[wgh_key][ix][jx])]
+
+    exe = cfu.ThreadPoolExecutor(max_workers=workers)
+
     det_ix = 0
     det_jx = 0
+    def inc(ix, jx):
+        jx += 1
+        if jx == sublens[ix]:
+            jx = 0
+            ix += 1
+        if ix == l:
+            ix = 0
+        return ix, jx
+        
     while True:
+        ixes, jxes = [], []
         if rand:
-            ixes = npr.randint(l, size=bs)
-            
-            
-            jxes = [npr.randint(sublens[ix]) for ix in ixes]
+            _ixes = npr.randint(l, size=bs)
+            for _ix in _ixes:
+                ixes += [_ix for _ in range(seqlen)]
+                jx = npr.randint(sublens[_ix] - seqlen + 1)
+                jxes += [jx + i for i in range(seqlen)]
         else:
-            ixes = [] 
-            jxes = []
-            jx = det_jx
-            ix = det_ix
-            for i in range(bs):
-                jxes.append(jx)
+            for _ in range(bs):
+                ix, jx = det_ix, det_jx
                 ixes.append(ix)
-                jx += 1
-                if jx == sublens[ix]:
-                    jx = 0
-                    ix += 1
-                if ix == l:
-                    ix = 0
-                
-        for b in range(bs):
-            # TODO: suboptimal implementation
-            # can't pick
-            while rand and jx + seqlen >= sublens[ix]:
-                jx = npr.randint(sublens[ix])
+                jxes.append(jx)
+                det_ix, det_jx = inc(ix, jx)
 
-            for sx in range(seqlen):
-                for k, v in data.items():
-                    d = v[ix][jx]
-                    if seqlen > 1:
-                        batch[k][b, sx] = d if k not in trans else trans[k](d)
-                    else:
-                        batch[k][b] = d if k not in trans else trans[k](d)
-                jx += 1
+        sxes = itr.cycle([i for i in range(seqlen)])
 
-            det_jx = jx
-            if not rand:
-                if det_jx >= sublens[ix] - seqlen:
-                    det_jx = 0
-                    det_ix += 1
-                if det_ix == l:
-                    if ret:
-                        return
-                    else:
-                        det_ix = 0
-                        det_jx = 0
-            batch_w[wgh_key][b] = wgh[np.argmax(data[wgh_key][ix][jx])]
+        list(exe.map(do_sample, zip(range(bs), ixes, jxes, sxes)))
 
         yield batch, batch_w
 
