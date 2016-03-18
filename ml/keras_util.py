@@ -9,7 +9,7 @@ import time
 import keras.backend as K
 import keras.callbacks as kcb
 import keras.models as krm
-import keras.utils.visualize_util as kuv
+# import keras.utils.visualize_util as kuv
 import numpy as np
 import sklearn.metrics as skm
 
@@ -52,8 +52,7 @@ class ModelHandler:
                       ext=JSON_EXT):
         j, h = mk_identifier(m)
         fn = ('{}'.format(mn) if mn else '') + '.{}'.format(ext)
-        fn = osp.join(self.MODEL_ROOT,
-                      self.get_model_path(m), fn)
+        fn = osp.join(self.get_model_path(m), fn)
         if get_jh:
             return fn, j, h
         else:
@@ -64,8 +63,8 @@ class ModelHandler:
         pn = self.mk_model_name(m, mn=mn, ext=PNG_EXT)
         with open(fn, 'w') as f:
             f.write(j)
-
-        kuv.plot(m, to_file=pn)
+        
+        # kuv.plot(m, to_file=pn)
 
     def load_model(self, m, mn=None):
         fn = self.mk_model_name(m, mn=mn)

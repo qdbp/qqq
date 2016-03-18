@@ -99,21 +99,20 @@ def iter_batches(data, bs, rand=True, excl_func=None,
             else:
                 batch[k][bx] = d if k not in trans else trans[k](d)
 
-        if bx == 0:
-            batch_w[wgh_key][bx] = wgh[np.argmax(data[wgh_key][ix][jx])]
+        batch_w[wgh_key][bx] = wgh[np.argmax(data[wgh_key][ix][jx])]
 
     exe = cfu.ThreadPoolExecutor(max_workers=workers)
 
     det_ix = 0
     det_jx = 0
-    def inc(ix, jx):
-        jx += 1
-        if jx == sublens[ix]:
-            jx = 0
-            ix += 1
-        if ix == l:
-            ix = 0
-        return ix, jx
+    def inc(i, j):
+        j += 1
+        if j > sublens[i] - seqlen:
+            j = 0
+            i += 1
+        if i == l:
+            i = 0
+        return i, j
         
     while True:
         ixes, jxes = [], []
@@ -143,18 +142,17 @@ def get_wgh(ys):
     return wgh*(len(wgh)/np.sum(wgh))
 
 if __name__ == '__main__':
-    x = [np.zeros((1000, 1, 100, 100)) for i in range(10)]
-    y = [np.ones((1000, 5)) for i in range(10)]
-    z = [np.zeros((1000, 1, 25, 25)) for i in range(10)]
+    x = [np.zeros((100*(i+1), 3, 100, 100)) + i for i in range(10)]
+    y = [np.ones((100*(i+1), 5)) + i for i in range(10)]
+    z = [np.zeros((100*(i+1), 3, 25, 25)) + i for i in range(10)]
 
     data = {'x': x, 'y': y, 'z': z}
 
     gen = iter_batches(data, 256)
-    gen = iter_batches(data, 256, seqlen=5)
 
     import time
     t = time.time()
     for i, ix in zip(gen, range(1000)):
-        print(i[0]['x'].shape)
+        print(i[0]['x'][:, 0, 5, 5])
 
     print('{:.3f}'.format(time.time() - t))
