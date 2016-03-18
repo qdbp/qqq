@@ -86,6 +86,7 @@ def iter_batches(data, bs, rand=True, excl_func=None,
     wgh = get_wgh(data[wgh_key])
 
     def do_sample(ix, jx):
+        pass
         
     det_ix = 0
     det_jx = 0
