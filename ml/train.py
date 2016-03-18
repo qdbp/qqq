@@ -6,8 +6,8 @@ import numpy as np
 import numpy.random as npr
 
 
-def iter_batches(data, bs, rand=True, excl_func=None,
-                 trans=None, ret=False, wgh_key='y', seqlen=1,
+def iter_batches(data, bs, rand=True, excl_dict=None,
+                 trans=None, wgh_key='y', seqlen=1,
                  workers=8):
     """ Given a dictionary of lists of lists, each list of lists
         with all lists of lists having the same length, and
@@ -41,13 +41,9 @@ def iter_batches(data, bs, rand=True, excl_func=None,
                 the generator will return immediately on seeing the last
                 sample. Consequently, the last (#samples)%bs points will
                 never be yielded.
-            ret:
-                Whether to return when the the input lists have been exhausted.
-                Only applied when rand is False
-            excl_func:
-                a callable taking a single sample and returning a boolean.
-                Called on every sample, causing the sample to be skipped
-                if the return value is False.
+            excl_dict:
+                dictionary of functions called on their respective raw input to check
+                whether this input should be excluded
             trans:
                 dictionary of transformation
                 transformation function arbitrarily mapping a sample
@@ -62,6 +58,8 @@ def iter_batches(data, bs, rand=True, excl_func=None,
 
     if trans is None:
         trans = {}
+    if excl_dict is None:
+        excl_dict = {}
 
     # lens of master lists
     lens = set()
@@ -92,8 +90,13 @@ def iter_batches(data, bs, rand=True, excl_func=None,
 
     def do_sample(args):
         bx, ix, jx, sx = args
+        incl = True
         for k, v in data.items():
             d = v[ix][jx]
+            incl &= True if not k in excl_dict else not excl_dict[k](d)
+            if not incl:
+                batch_w[wgh_key][bx] = 0
+                return
             if seqlen > 1:
                 batch[k][bx, sx] = d if k not in trans else trans[k](d)
             else:
