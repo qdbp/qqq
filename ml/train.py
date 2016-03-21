@@ -1,9 +1,14 @@
+import concurrent.futures as cfu
+import itertools as itr
+import threading
+
 import numpy as np
 import numpy.random as npr
 
 
-def iter_batches(data, bs, rand=True, excl_func=None,
-                 trans=None, ret=False, wgh_key='y', seqlen=1):
+def iter_batches(data, bs, rand=True, excl_dict=None,
+                 trans=None, wgh_key='y', seqlen=1,
+                 workers=8):
     """ Given a dictionary of lists of lists, each list of lists
         with all lists of lists having the same length, and
         all ith sublists in the list of lists having the same length.
@@ -36,13 +41,9 @@ def iter_batches(data, bs, rand=True, excl_func=None,
                 the generator will return immediately on seeing the last
                 sample. Consequently, the last (#samples)%bs points will
                 never be yielded.
-            ret:
-                Whether to return when the the input lists have been exhausted.
-                Only applied when rand is False
-            excl_func:
-                a callable taking a single sample and returning a boolean.
-                Called on every sample, causing the sample to be skipped
-                if the return value is False.
+            excl_dict:
+                dictionary of functions called on their respective raw input to check
+                whether this input should be excluded
             trans:
                 dictionary of transformation
                 transformation function arbitrarily mapping a sample
@@ -57,6 +58,8 @@ def iter_batches(data, bs, rand=True, excl_func=None,
 
     if trans is None:
         trans = {}
+    if excl_dict is None:
+        excl_dict = {}
 
     # lens of master lists
     lens = set()
@@ -85,38 +88,53 @@ def iter_batches(data, bs, rand=True, excl_func=None,
     batch_w = {wgh_key: np.zeros(bs)}
     wgh = get_wgh(data[wgh_key])
 
+    def do_sample(args):
+        bx, ix, jx, sx = args
+        incl = True
+        for k, v in data.items():
+            d = v[ix][jx]
+            incl &= True if not k in excl_dict else not excl_dict[k](d)
+            if not incl:
+                batch_w[wgh_key][bx] = 0
+                return
+            if seqlen > 1:
+                batch[k][bx, sx] = d if k not in trans else trans[k](d)
+            else:
+                batch[k][bx] = d if k not in trans else trans[k](d)
+
+        batch_w[wgh_key][bx] = wgh[np.argmax(data[wgh_key][ix][jx])]
+
+    exe = cfu.ThreadPoolExecutor(max_workers=workers)
+
     det_ix = 0
     det_jx = 0
+    def inc(i, j):
+        j += 1
+        if j > sublens[i] - seqlen:
+            j = 0
+            i += 1
+        if i == l:
+            i = 0
+        return i, j
+        
     while True:
-        for b in range(bs):
-            ix = npr.randint(l) if rand else det_ix
-            jx = npr.randint(sublens[ix]) if rand else det_jx
-            # TODO: suboptimal implementation
-            # can't pick
-            while rand and jx + seqlen >= sublens[ix]:
-                jx = npr.randint(sublens[ix])
+        ixes, jxes = [], []
+        if rand:
+            _ixes = npr.randint(l, size=bs)
+            for _ix in _ixes:
+                ixes += [_ix for _ in range(seqlen)]
+                jx = npr.randint(sublens[_ix] - seqlen + 1)
+                jxes += [jx + i for i in range(seqlen)]
+        else:
+            for _ in range(bs):
+                ix, jx = det_ix, det_jx
+                ixes.append(ix)
+                jxes.append(jx)
+                det_ix, det_jx = inc(ix, jx)
 
-            for sx in range(seqlen):
-                for k, v in data.items():
-                    d = v[ix][jx]
-                    if seqlen > 1:
-                        batch[k][b, sx] = d if k not in trans else trans[k](d)
-                    else:
-                        batch[k][b] = d if k not in trans else trans[k](d)
-                jx += 1
+        sxes = itr.cycle([i for i in range(seqlen)])
 
-            det_jx = jx
-            if not rand:
-                if det_jx >= sublens[ix] - seqlen:
-                    det_jx = 0
-                    det_ix += 1
-                if det_ix == l:
-                    if ret:
-                        return
-                    else:
-                        det_ix = 0
-                        det_jx = 0
-            batch_w[wgh_key][b] = wgh[np.argmax(data[wgh_key][ix][jx])]
+        list(exe.map(do_sample, zip(range(bs), ixes, jxes, sxes)))
 
         yield batch, batch_w
 
@@ -127,18 +145,17 @@ def get_wgh(ys):
     return wgh*(len(wgh)/np.sum(wgh))
 
 if __name__ == '__main__':
-    x = [np.zeros((1000, 1, 100, 100)) for i in range(10)]
-    y = [np.ones((1000, 5)) for i in range(10)]
-    z = [np.zeros((1000, 1, 25, 25)) for i in range(10)]
+    x = [np.zeros((100*(i+1), 3, 100, 100)) + i for i in range(10)]
+    y = [np.ones((100*(i+1), 5)) + i for i in range(10)]
+    z = [np.zeros((100*(i+1), 3, 25, 25)) + i for i in range(10)]
 
     data = {'x': x, 'y': y, 'z': z}
 
     gen = iter_batches(data, 256)
-    gen = iter_batches(data, 256, seqlen=5)
 
     import time
     t = time.time()
     for i, ix in zip(gen, range(1000)):
-        print(i[0]['x'].shape)
+        print(i[0]['x'][:, 0, 5, 5])
 
     print('{:.3f}'.format(time.time() - t))
