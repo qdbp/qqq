@@ -132,7 +132,7 @@ class SQLiteTable:
 
     def get_where(self, where):
         exe = ('SELECT * FROM {} WHERE '.format(self.tabn) +
-               ' AND '.join('{}{}?'.format(i, j) for i, j, k in where))
+               ' AND '.join('{} {} ?'.format(i, j) for i, j, k in where))
         self.c.execute(exe, tuple(k for i, j, k in where))
         return self.c.fetchall()
 

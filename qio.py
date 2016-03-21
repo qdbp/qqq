@@ -81,3 +81,8 @@ def scraper(get_func, args, process_func, max_workers=64, sleep=0.05):
                     return
                 else:
                     time.sleep(sleep)
+
+
+def rq_json(base_url, params):
+    import requests as rqs
+    return rqs.get(base_url, params=params).json()
