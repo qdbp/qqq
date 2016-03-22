@@ -45,7 +45,7 @@ def p(fn, f, args=(), kwargs=None, d='.', ow=False, owa=(), owk=None):
         return res
 
 
-def scraper(get_func, args, process_func, max_workers=64, sleep=0.05):
+def scrape(get_func, args, process_func, max_workers=64, sleep=0.05):
     '''
     Function to abstract a scraping process wherein a slow, parallelizable
     I/O operation feeds a fast processor. Many instances of the I/O operation
