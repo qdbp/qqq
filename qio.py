@@ -3,6 +3,7 @@ import os.path as osp
 import pickle as pkl
 import queue as que
 import time
+import traceback as trc
 
 
 def wr(*args):
@@ -45,7 +46,8 @@ def p(fn, f, args=(), kwargs=None, d='.', ow=False, owa=(), owk=None):
         return res
 
 
-def scraper(get_func, args, process_func, max_workers=64, sleep=0.05):
+def scrape(get_func, args, process_func, max_workers=64, sleep=0.05,
+           allow_fail=[], verbose=True):
     '''
     Function to abstract a scraping process wherein a slow, parallelizable
     I/O operation feeds a fast processor. Many instances of the I/O operation
@@ -75,9 +77,23 @@ def scraper(get_func, args, process_func, max_workers=64, sleep=0.05):
 
         while True:
             try:
-                process_func(q.get_nowait())
+                res = q.get_nowait()
+                try:
+                    process_func(res)
+                except Exception as e:
+                    if verbose:
+                        trc.print_exc()
+                    if not type(e) in allow_fail:
+                        for f in futs:
+                            f.cancel()
+                        break
             except que.Empty:
                 if all(f.done() for f in futs):
                     return
                 else:
                     time.sleep(sleep)
+
+
+def rq_json(base_url, params):
+    import requests as rqs
+    return rqs.get(base_url, params=params).json()
