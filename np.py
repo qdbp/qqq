@@ -2,7 +2,7 @@ import numpy.random as npr
 from numpy.lib.stride_tricks import as_strided
 
 
-def sl_window(a, w, s, axis=0):
+def sl_window(a, w, s, axis=0, sl_axis=0):
     """
     Generates staggered windows of an array.
 
@@ -26,26 +26,27 @@ def sl_window(a, w, s, axis=0):
 
     nas = list(a.shape)
     nas[axis] = w
-    ns = (nw,) + tuple(nas)
+    ns = tuple(nas[:sl_axis] + [nw] + nas[sl_axis:])
 
-    ss = (s*a.strides[axis],) + a.strides
+    nss = list(a.strides)
+    ss = tuple(nss[:sl_axis] + [s*a.strides[axis]] + nss[sl_axis:])
     out = as_strided(a, ns, ss)
 
     return out
 
 
-def unsl_window(a, axis=0):
+def unsl_window(a, axis=0, sl_axis=0):
     """
     Undoes the action of sl_window to the extent possible.
 
     Cannot recover samples trimmed by sl_window.
     """
 
-    osh = list(a.shape[1:])
-    osh[axis] *= a.shape[0]
+    osh = list(a.shape[:sl_axis] + a.shape[sl_axis+1:])
+    osh[axis] *= a.shape[sl_axis]
     osh = tuple(osh)
 
-    ost = a.strides[1:]
+    ost = a.strides[:sl_axis] + a.strides[sl_axis+1:]
 
     out = as_strided(a, shape=osh, strides=ost)
 
