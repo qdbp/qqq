@@ -210,7 +210,7 @@ class TrainingMonitor(kcb.Callback):
 
         if self.stagcnt >= self.stagmax:
             sys.stdout.write('AEON {} COMPLETE'.format(self.aeon))
-            if self.aeon >= self.aeons + 1:
+            if self.aeon >= self.aeons - 1:
                 self.save_best_weights()
                 print(': TRAINING FINISHED')
                 self.model.stop_training = True

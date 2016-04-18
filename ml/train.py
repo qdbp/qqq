@@ -7,7 +7,8 @@ import numpy.random as npr
 
 
 def iter_batches(data, bs, rand=True, excl_dict=None,
-                 trans=None, wgh_key='y', seqlen=1,
+                 trans=None, wgh_key='y', seqlen=1, seq_mode=None,
+                 concat_axis=None,
                  workers=8):
     """ Given a dictionary of lists of lists, each list of lists
         with all lists of lists having the same length, and
@@ -53,8 +54,34 @@ def iter_batches(data, bs, rand=True, excl_dict=None,
                 function on the first sample. If a dictionary is returned,
                 the output will aggregate the transformations of bs samples
                 in a single dictionary, grouped by key.
+            seqlen:
+                number of consecutive data points to place in a sequence,
+                according to the mode specified by seq_mode
+            seq_mode:
+                dict specifying how to, for each output, handle sequence
+                elements. Can be one of 'concat', 'newdim' or 'last'.
+                'concat' concatenates along the axis given in concat_axis,
+                which must be given if 'concat' is used. 'newdim' creates a new
+                dimension in the batch array and orders the sequence elements
+                therealong.
+                'last' selects the last element of the sequence.
+                Defaults to 'newaxis'.
+            concat_axis:
+                dictionary giving axes along which to concatenate the given
+                outputs for which seq_mode is concat.
 
     """
+    
+    if seq_mode is None:
+        seq_mode = {}
+    if concat_axis is None:
+        concat_axis = {}
+
+    try:
+        assert all(k in concat_axis for k, v in seq_mode.items()
+                   if v == 'concat')
+    except AssertionError:
+        raise ValueError('did not specify concat axis for some data!')
 
     if trans is None:
         trans = {}
@@ -79,11 +106,22 @@ def iter_batches(data, bs, rand=True, excl_dict=None,
 
     l = lens.pop()
 
-    batch = {k: np.zeros((bs,) + ((seqlen,) if seqlen > 1 else ()) +
-                         trans.get(k, lambda x: x)(data[k][0][0]).shape
-                         )
-             for k in data.keys()
-             }
+    batch = {}
+    for k in data.keys():
+        sm = seq_mode.get(k, 'newdim')
+        data_shape = trans.get(k, lambda x: x)(data[k][0][0]).shape
+
+        if sm == 'concat':
+            ca = concat_axis[k]
+            data_shape = list(data_shape)
+            data_shape[ca] *= seqlen
+            data_shape = tuple(data_shape)
+
+        batch[k] = np.zeros((bs,) +
+                            ((seqlen,)
+                             if (seqlen > 1 and sm == 'newdim')
+                             else ()) +
+                            data_shape)
 
     batch_w = {wgh_key: np.zeros(bs)}
     wgh = get_wgh(data[wgh_key])
@@ -93,14 +131,29 @@ def iter_batches(data, bs, rand=True, excl_dict=None,
         incl = True
         for k, v in data.items():
             d = v[ix][jx]
-            incl &= True if not k in excl_dict else not excl_dict[k](d)
+            sm = seq_mode.get(k, 'newdim')
+            incl &= True if k not in excl_dict else not excl_dict[k](d)
             if not incl:
                 batch_w[wgh_key][bx] = 0
                 return
-            if seqlen > 1:
-                batch[k][bx, sx] = d if k not in trans else trans[k](d)
+
+            val = d if k not in trans else trans[k](d)
+
+            if sm == 'newdim':
+                batch[k][bx, sx] = val
+            elif sm == 'concat':
+                ca = concat_axis[k]
+                index = [bx] + [slice(None, None, None) for _ in val.shape]
+                index[ca+1] = slice(sx*val.shape[ca],
+                                    (sx+1)*val.shape[ca],
+                                    None)
+                index = tuple(index)
+                batch[k][index] = val
+            elif sm == 'last':
+                if sx == seqlen-1:
+                    batch[k][bx] = val
             else:
-                batch[k][bx] = d if k not in trans else trans[k](d)
+                raise ValueError('unrecognized seq_mode {}'.format(sm))
 
         batch_w[wgh_key][bx] = wgh[np.argmax(data[wgh_key][ix][jx])]
 
@@ -108,6 +161,7 @@ def iter_batches(data, bs, rand=True, excl_dict=None,
 
     det_ix = 0
     det_jx = 0
+
     def inc(i, j):
         j += 1
         if j > sublens[i] - seqlen:
@@ -151,11 +205,18 @@ if __name__ == '__main__':
 
     data = {'x': x, 'y': y, 'z': z}
 
-    gen = iter_batches(data, 256)
+    gen = iter_batches(data, 256, seqlen=3, seq_mode={'x': 'last',
+                                                      'y': 'concat'},
+                       concat_axis={'y': 0})
+    out = next(gen)[0]
+    print(out)
+    print('x', out['x'].shape)
+    print('y', out['y'].shape)
+    print('z', out['z'].shape)
 
-    import time
-    t = time.time()
-    for i, ix in zip(gen, range(1000)):
-        print(i[0]['x'][:, 0, 5, 5])
+    # import time
+    # t = time.time()
+    # for i, ix in zip(gen, range(1000)):
+    #     print(i[0]['x'][:, 0, 5, 5])
 
-    print('{:.3f}'.format(time.time() - t))
+    # print('{:.3f}'.format(time.time() - t))
