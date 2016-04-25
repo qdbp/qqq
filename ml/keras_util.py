@@ -104,7 +104,7 @@ class TrainingMonitor(kcb.Callback):
     def __init__(self, vgen, vsamples, mhd, key='y',
                  stagmax=2, mname='unnamed_model',
                  aeons=5, aeon_lr_factor=1/3,
-                 aeon_stag_factor=2):
+                 aeon_stag_factor=2, init_lr=1e-3):
         self.vgen = vgen
         self.vsamples = vsamples
         self.mhd = mhd
@@ -116,6 +116,8 @@ class TrainingMonitor(kcb.Callback):
         self.aeon_stag_factor = aeon_stag_factor
         self.stagmax = stagmax
         self.stagcnt = 0
+
+        K.set_value(self.model.optimizer.lr, init_lr)
 
         self.best_loss = np.inf
         self.current_best_weights = None
