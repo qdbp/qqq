@@ -110,7 +110,6 @@ def iter_batches(data, bs, rand=True, excl_dict=None,
     for k in data.keys():
         sm = seq_mode.get(k, 'newdim')
         data_shape = trans.get(k, lambda x: x)(data[k][0][0]).shape
-        print(k, ' data_shape: ', data_shape)
 
         if sm == 'concat':
             ca = concat_axis[k]
@@ -149,7 +148,6 @@ def iter_batches(data, bs, rand=True, excl_dict=None,
                                     (sx+1)*val.shape[ca],
                                     None)
                 index = tuple(index)
-                print(index)
                 batch[k][index] = val
             elif sm == 'last':
                 if sx == seqlen-1:
@@ -204,7 +202,6 @@ def iter_batches(data, bs, rand=True, excl_dict=None,
 def get_wgh(ys):
     # mean of weights since uniform sampling in iter_batches!
     wgh = np.mean([1/np.sum(y, axis=0) for y in ys], axis=0)
-    print(wgh)
     return wgh*(len(wgh)/np.sum(wgh))
 
 if __name__ == '__main__':
