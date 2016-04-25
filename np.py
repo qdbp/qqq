@@ -2,7 +2,7 @@ import numpy.random as npr
 from numpy.lib.stride_tricks import as_strided
 
 
-def sl_window(a, w, s, axis=0):
+def sl_window(a, w, s, axis=0, sl_axis=0):
     """
     Generates staggered windows of an array.
 
@@ -15,6 +15,7 @@ def sl_window(a, w, s, axis=0):
         w: window size
         s: stride size
         axis: axis of a along which to slide the window
+        sl_axis: axis along which windows lie
 
     Return:
         out: array of windows; shape nwindows on zeroth axis,
@@ -26,30 +27,21 @@ def sl_window(a, w, s, axis=0):
 
     nas = list(a.shape)
     nas[axis] = w
-    ns = (nw,) + tuple(nas)
+    ns = tuple(nas[:sl_axis] + [nw] + nas[sl_axis:])
 
-    ss = (s*a.strides[axis],) + a.strides
+    nss = list(a.strides)
+    ss = tuple(nss[:sl_axis] + [s*a.strides[axis]] + nss[sl_axis:])
     out = as_strided(a, ns, ss)
 
     return out
 
 
-def unsl_window(a, axis=0):
+def unsl_window(a):
     """
     Undoes the action of sl_window to the extent possible.
-
-    Cannot recover samples trimmed by sl_window.
     """
 
-    osh = list(a.shape[1:])
-    osh[axis] *= a.shape[0]
-    osh = tuple(osh)
-
-    ost = a.strides[1:]
-
-    out = as_strided(a, shape=osh, strides=ost)
-
-    return out
+    return a.base.base
 
 
 def ttsplit(arrs, f=0.2, align=0, shf_train=True, shf_test=False):
@@ -109,3 +101,35 @@ def shuffle_arrs(arrs, rs=None):
         npr.shuffle(arr)
         if rs is not None:
             npr.set_state(rs)
+
+if __name__ == "__main__":
+    import numpy as np
+
+    test_arr = np.asarray(range(200))
+    test_arr = np.reshape(test_arr, (20, 10))
+
+    print(test_arr.shape)
+    print(test_arr)
+
+    
+    print('slide w{} s{} axis{}'.format(5, 3, 0))
+    t1 = sl_window(test_arr, 5, 3, axis=0)
+    print(t1.shape)
+    print(t1)
+
+    print('slide w{} s{} axis{}'.format(3, 3, 1))
+    t2 = sl_window(test_arr, 3, 3, axis=1)
+    print(t2.shape)
+    print(t2)
+
+    print('slide w{} s{} axis{} sl_axis{}'.format(5, 3, 0, 1))
+    t3 = sl_window(test_arr, 5, 3, axis=0, sl_axis=1)
+    print(t1.shape)
+    print(t1)
+
+    print('unsl t1')
+    print(unsl_window(t1))
+    print('unsl t2')
+    print(unsl_window(t2))
+    print('unsl t2')
+    print(unsl_window(t3))
