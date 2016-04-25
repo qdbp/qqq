@@ -117,7 +117,7 @@ class TrainingMonitor(kcb.Callback):
         self.stagmax = stagmax
         self.stagcnt = 0
 
-        K.set_value(self.model.optimizer.lr, init_lr)
+        self.init_lr = init_lr
 
         self.best_loss = np.inf
         self.current_best_weights = None
@@ -142,6 +142,7 @@ class TrainingMonitor(kcb.Callback):
         super().__init__()
 
     def on_train_begin(self, logs=None):
+        K.set_value(self.model.optimizer.lr, self.init_lr)
         self.start_mark = time.time()
         print(self.begin_str
               .format('='*80,
