@@ -7,8 +7,8 @@ import numpy.random as npr
 
 
 def iter_batches(data, bs, rand=True, excl_dict=None,
-                 trans=None, wgh_key='y', seqlen=1, seq_mode=None,
-                 concat_axis=None,
+                 trans=None, do_weight=True, wgh_key='y',
+                 seqlen=1, seq_mode=None, concat_axis=None,
                  workers=8):
     """ Given a dictionary of lists of lists, each list of lists
         with all lists of lists having the same length, and
@@ -154,8 +154,11 @@ def iter_batches(data, bs, rand=True, excl_dict=None,
                     batch[k][bx] = val
             else:
                 raise ValueError('unrecognized seq_mode {}'.format(sm))
-
-        batch_w[wgh_key][bx] = wgh[np.argmax(data[wgh_key][ix][jx])]
+        
+        if do_weight:
+            batch_w[wgh_key][bx] = wgh[np.argmax(data[wgh_key][ix][jx])]
+        else:
+            batch_w[wgh_key][bx] = 1.
 
     exe = cfu.ThreadPoolExecutor(max_workers=workers)
 
