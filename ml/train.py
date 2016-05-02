@@ -127,7 +127,6 @@ def iter_batches(data, bs, rand=True, excl_dict=None,
     wgh = get_wgh(data[wgh_key])
 
     def do_sample(args):
-        print(args)
         bx, ix, jx, sx = args
         incl = True
         for k, v in data.items():
