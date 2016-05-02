@@ -127,6 +127,7 @@ def iter_batches(data, bs, rand=True, excl_dict=None,
     wgh = get_wgh(data[wgh_key])
 
     def do_sample(args):
+        print(args)
         bx, ix, jx, sx = args
         incl = True
         for k, v in data.items():
@@ -177,13 +178,13 @@ def iter_batches(data, bs, rand=True, excl_dict=None,
     while True:
         ixes, jxes = [], []
         if rand:
-            _ixes = npr.randint(l, size=bs)
+            _ixes = npr.randint(l, size=bs*seqlen)
             for _ix in _ixes:
                 ixes += [_ix for _ in range(seqlen)]
                 jx = npr.randint(sublens[_ix] - seqlen + 1)
                 jxes += [jx + i for i in range(seqlen)]
         else:
-            for _ in range(bs):
+            for _ in range(bs*seqlen):
                 ix, jx = det_ix, det_jx
                 ixes.append(ix)
                 jxes.append(jx)
@@ -221,7 +222,9 @@ if __name__ == '__main__':
 
     gen = iter_batches(data, 128, seqlen=3, seq_mode={'x': 'concat',
                                                       'y': 'last'},
-                       concat_axis={'x': 1})
+                       concat_axis={'x': 1},
+                       rand=True)
+
     out = next(gen)[0]
     print(out['x'][21])
     print(out['y'][21])
