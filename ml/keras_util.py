@@ -104,7 +104,8 @@ class TrainingMonitor(kcb.Callback):
     def __init__(self, vgen, vsamples, mhd, key='y',
                  stagmax=2, mname='unnamed_model',
                  aeons=5, aeon_lr_factor=1/3,
-                 aeon_stag_factor=2, init_lr=1e-3):
+                 aeon_stag_factor=2, init_lr=1e-3,
+                 save_best_train=False):
         self.vgen = vgen
         self.vsamples = vsamples
         self.mhd = mhd
@@ -120,7 +121,9 @@ class TrainingMonitor(kcb.Callback):
         self.init_lr = init_lr
 
         self.best_loss = np.inf
+        self.best_tloss = np.inf
         self.current_best_weights = None
+        self.save_best_train = save_best_train
 
         self.aeon = 0
         self.epoch = 0
@@ -168,32 +171,17 @@ class TrainingMonitor(kcb.Callback):
                                                       logs['size'],
                                                       self.cur_loss))
 
+        if self.save_best_train and self.cur_loss < self.best_tloss:
+            self.mhd.save_weights(self.model, mname=self.mname+'_best_train',
+                                  overwrite=True)
+
     def on_epoch_begin(self, epoch, logs=None):
         self.epoch_mark = time.time()
         self.epoch += 1
 
     def on_epoch_end(self, epoch, logs=None):
         loss = logs['val_loss']
-        # accs = []
-        # losses = []
-        # weights = []
-        # done_samples = 0
-        # while True:
-        #     data, _ = next(self.vgen)
-        #     pred = self.model.predict(data)[self.key]
-        #     done_samples += len(pred)
-        #     # TODO: assumes cce loss
-        #     loss = -np.mean(np.log(np.max(pred, axis=1)))
-        #     acc = skm.accuracy_score(np.argmax(data[self.key], axis=-1),
-        #                              np.argmax(pred, axis=-1))
-        #     accs.append(float(acc))
-        #     losses.append(float(loss))
-        #     weights.append(len(pred))
-        #     if done_samples > self.vsamples:
-        #         break
-
-        # acc = np.average(accs, weights=weights)
-        # loss = np.average(losses, weights=weights)
+        tloss = logs['loss']
 
         if loss >= self.best_loss:
             self.stagcnt += 1
