@@ -172,7 +172,7 @@ class TrainingMonitor(kcb.Callback):
                                                       self.cur_loss))
 
         if self.save_best_train and self.cur_loss < self.best_tloss:
-            self.mhd.save_weights(self.model, mname=self.mname+'_best_train',
+            self.mhd.save_weights(self.model, mn=self.mname+'_best_train',
                                   overwrite=True)
 
     def on_epoch_begin(self, epoch, logs=None):
