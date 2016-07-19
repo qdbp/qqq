@@ -220,10 +220,7 @@ class TrainingMonitor(kcb.Callback):
 
     def on_epoch_end(self, epoch, logs=None):
         loss = logs['val_loss']
-<<<<<<< HEAD
-=======
         tloss = logs['loss']
->>>>>>> 3ca0ca0ee497cfab926025333d69abe107d49da6
 
         if loss >= self.best_loss:
             self.stagcnt += 1
