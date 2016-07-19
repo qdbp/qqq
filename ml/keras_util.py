@@ -13,6 +13,8 @@ import keras.models as krm
 import numpy as np
 import sklearn.metrics as skm
 
+from qqq.np import decay as decay
+
 HDF5_EXT = 'hdf5'
 JSON_EXT = 'json'
 PNG_EXT = 'png'
@@ -91,6 +93,43 @@ class ModelHandler:
             K.set_value(m.optimizer.lr, reset_lr)
         return m
 
+class PIDLearner:
+    def __init__(self, base_lr, patience=1e4,
+                 p=0.6, i=0.2, d=0.1, k=1/5, scale=1e-3):
+
+        self.pat = patience
+        self.b_lr = base_lr
+        self.p = p
+        self.i = i
+        self.d = d
+        self.k = k
+
+        self._c_lr = 1
+        self._std = 1
+        self._mu = 0
+        self._p_val = 0
+        self._i_val = 0
+        self._d_val = 0
+
+    def step(self, v_loss):
+        if self._mu is None:
+            self._mu = v_loss
+
+        self._std = decay(self.k, v_loss - self.mu, self._std)
+
+        # time for magic fudge; should learn this
+        self._i_val += v_loss - self._mu
+        self._p_val = v_loss - self._mu
+
+        self._mu = decay(self.k, v_loss, self._mu)
+        # the "maybe, sort of derivative"(tm) from Naumov MathWorks(R)
+        self._d_val = (v_loss - self._mu)/self._mu
+
+        lr_adj = -(self._i_val * self.i +
+                   self._p_val * self.p +
+                   self._d_val * self.d)
+        kill = self._i_val > self.patience
+        return lr_adj, self._i_val, kill
 
 class TrainingMonitor(kcb.Callback):
     """
@@ -104,7 +143,8 @@ class TrainingMonitor(kcb.Callback):
     def __init__(self, vgen, vsamples, mhd, key='y',
                  stagmax=2, mname='unnamed_model',
                  aeons=5, aeon_lr_factor=1/3,
-                 aeon_stag_factor=2):
+                 aeon_stag_factor=2,
+                 use_pid=False):
         self.vgen = vgen
         self.vsamples = vsamples
         self.mhd = mhd
@@ -171,26 +211,6 @@ class TrainingMonitor(kcb.Callback):
 
     def on_epoch_end(self, epoch, logs=None):
         loss = logs['val_loss']
-        # accs = []
-        # losses = []
-        # weights = []
-        # done_samples = 0
-        # while True:
-        #     data, _ = next(self.vgen)
-        #     pred = self.model.predict(data)[self.key]
-        #     done_samples += len(pred)
-        #     # TODO: assumes cce loss
-        #     loss = -np.mean(np.log(np.max(pred, axis=1)))
-        #     acc = skm.accuracy_score(np.argmax(data[self.key], axis=-1),
-        #                              np.argmax(pred, axis=-1))
-        #     accs.append(float(acc))
-        #     losses.append(float(loss))
-        #     weights.append(len(pred))
-        #     if done_samples > self.vsamples:
-        #         break
-
-        # acc = np.average(accs, weights=weights)
-        # loss = np.average(losses, weights=weights)
 
         if loss >= self.best_loss:
             self.stagcnt += 1
@@ -229,4 +249,4 @@ class TrainingMonitor(kcb.Callback):
         self.model.set_weights(self.current_best_weights)
         self.mhd.save_weights(self.model,
                               mn=self.mname+'_best_l:{:.3f}'
-                              .format(self.best_loss))
+                              .format(self.best_loss), overwrite=True)

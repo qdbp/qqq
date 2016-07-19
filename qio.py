@@ -3,6 +3,7 @@ import os.path as osp
 import pickle as pkl
 import queue as que
 import time
+import threading
 import traceback as trc
 
 
@@ -47,7 +48,7 @@ def p(fn, f, args=(), kwargs=None, d='.', ow=False, owa=(), owk=None):
 
 
 def scrape(get_func, args, process_func, max_workers=64, sleep=0.05,
-           allow_fail=[], verbose=True):
+           allow_fail=[], verbose=True, mode='thread'):
     '''
     Function to abstract a scraping process wherein a slow, parallelizable
     I/O operation feeds a fast processor. Many instances of the I/O operation
@@ -64,13 +65,26 @@ def scrape(get_func, args, process_func, max_workers=64, sleep=0.05,
             any time.
         sleep: time to sleep each time no data from `get_func`s is available
             for process_func
+        allow_fail: list of exception classes which when raised by a worker
+            thread will be suppressed rather than terminate the operation.
+        verbose: whether to print allowed exceptions when they arise.
+        mode: "thread" or "process" - whether to put jobs in separate threads,
+            or separate processes. The latter may not be possible in all
+            circumstances, depending on get_function.
     '''
     q = que.Queue()
 
     def queuer(arg):
         q.put(get_func(arg))
 
-    with cfu.ThreadPoolExecutor(max_workers=max_workers) as x:
+    if mode == 'thread':
+        c_exe = cfu.ThreadPoolExecutor
+    elif mode == 'process':
+        c_exe = cfu.ProcessPoolExecutor
+    else:
+        raise ValueError('invalid mode {}'.format(mode))
+
+    with c_exe(max_workers=max_workers) as x:
         futs = set()
         for arg in args:
             futs.add(x.submit(queuer, arg))
@@ -92,6 +106,39 @@ def scrape(get_func, args, process_func, max_workers=64, sleep=0.05,
                     return
                 else:
                     time.sleep(sleep)
+
+
+# def enqueue(get_func, max_workers=8, max_queue_size=128,
+#             mode='thread', sleep=0.05):
+#     '''
+#     Builds a queue out of a data-generating function
+#     '''
+#     q = que.Queue(maxsize=max_queue_size)
+#     stop = threading.Event()
+#     def queuer():
+#         q.put(get_func())
+# 
+#     jobs = set()
+# 
+#     if mode == 'thread':
+#         c_exe = cfu.ThreadPoolExecutor
+#     elif mode == 'process':
+#         c_exe = cfu.ProcessPoolExecutor
+#     else:
+#         raise ValueError('invalid mode {}, must be "thread" or "process"'
+#                          .format(mode))
+# 
+#     with c_exe(max_workers=max_workers) as x:
+#         while True:
+#             while len(jobs) < max_queue_size:
+#                 x.submit(queuer)
+#             new_jobs = set()
+#             for f in jobs():
+#                 if not f.done():
+#                     new_jobs.add(f)
+#             jobs = new_jobs
+
+        
 
 
 def rq_json(base_url, params):

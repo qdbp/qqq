@@ -2,6 +2,11 @@ import numpy.random as npr
 from numpy.lib.stride_tricks import as_strided
 
 
+def decay(k, x, x0):
+    return k*x + (1-k)*x0
+
+
+
 def sl_window(a, w, s, axis=0, sl_axis=0):
     """
     Generates staggered windows of an array.
