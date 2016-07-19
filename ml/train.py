@@ -7,8 +7,8 @@ import numpy.random as npr
 
 
 def iter_batches(data, bs, rand=True, excl_dict=None,
-                 trans=None, wgh_key='y', seqlen=1, seq_mode=None,
-                 concat_axis=None,
+                 trans=None, do_weight=True, wgh_key='y',
+                 seqlen=1, seq_mode=None, concat_axis=None,
                  workers=8):
     """ Given a dictionary of lists of lists, each list of lists
         with all lists of lists having the same length, and
@@ -154,8 +154,11 @@ def iter_batches(data, bs, rand=True, excl_dict=None,
                     batch[k][bx] = val
             else:
                 raise ValueError('unrecognized seq_mode {}'.format(sm))
-
-        batch_w[wgh_key][bx] = wgh[np.argmax(data[wgh_key][ix][jx])]
+        
+        if do_weight:
+            batch_w[wgh_key][bx] = wgh[np.argmax(data[wgh_key][ix][jx])]
+        else:
+            batch_w[wgh_key][bx] = 1.
 
     exe = cfu.ThreadPoolExecutor(max_workers=workers)
 
@@ -174,13 +177,13 @@ def iter_batches(data, bs, rand=True, excl_dict=None,
     while True:
         ixes, jxes = [], []
         if rand:
-            _ixes = npr.randint(l, size=bs)
+            _ixes = npr.randint(l, size=bs*seqlen)
             for _ix in _ixes:
                 ixes += [_ix for _ in range(seqlen)]
                 jx = npr.randint(sublens[_ix] - seqlen + 1)
                 jxes += [jx + i for i in range(seqlen)]
         else:
-            for _ in range(bs):
+            for _ in range(bs*seqlen):
                 ix, jx = det_ix, det_jx
                 ixes.append(ix)
                 jxes.append(jx)
@@ -188,7 +191,13 @@ def iter_batches(data, bs, rand=True, excl_dict=None,
 
         sxes = itr.cycle([i for i in range(seqlen)])
 
-        list(exe.map(do_sample, zip(range(bs), ixes, jxes, sxes)))
+        list(exe.map(do_sample,
+                     zip([bx for bx in range(bs) for _ in range(seqlen)],
+                         ixes,
+                         jxes,
+                         sxes)
+                     )
+             )
 
         yield batch, batch_w
 
@@ -199,24 +208,29 @@ def get_wgh(ys):
     return wgh*(len(wgh)/np.sum(wgh))
 
 if __name__ == '__main__':
-    x = [np.zeros((100*(i+1), 3, 100, 100)) + i for i in range(10)]
-    y = [np.ones((100*(i+1), 5)) + i for i in range(10)]
-    z = [np.zeros((100*(i+1), 3, 25, 25)) + i for i in range(10)]
+    from keras.datasets import mnist
+    from keras.utils import np_utils
+    import matplotlib.pyplot as plt
+    (X_train, y_train), (X_test, y_test) = mnist.load_data()
+    X_train = X_train.reshape(X_train.shape[0], 28, 28)
+    X_test = X_test.reshape(X_test.shape[0], 28, 28)
+    Y_train = np_utils.to_categorical(y_train, 10)
+    Y_test = np_utils.to_categorical(y_test, 10)
 
-    data = {'x': x, 'y': y, 'z': z}
+    data = {'x': [X_train, X_test], 'y': [Y_train, Y_test]}
 
-    gen = iter_batches(data, 256, seqlen=3, seq_mode={'x': 'last',
-                                                      'y': 'concat'},
-                       concat_axis={'y': 0})
+    gen = iter_batches(data, 128, seqlen=3, seq_mode={'x': 'concat',
+                                                      'y': 'last'},
+                       concat_axis={'x': 1},
+                       rand=True)
+
     out = next(gen)[0]
-    print(out)
-    print('x', out['x'].shape)
-    print('y', out['y'].shape)
-    print('z', out['z'].shape)
+    print(out['x'][21])
+    print(out['y'][21])
+    plt.matshow(out['x'][21])
 
-    # import time
-    # t = time.time()
-    # for i, ix in zip(gen, range(1000)):
-    #     print(i[0]['x'][:, 0, 5, 5])
+    print(out['x'][22])
+    print(out['y'][22])
+    plt.matshow(out['x'][22])
 
-    # print('{:.3f}'.format(time.time() - t))
+    plt.show()

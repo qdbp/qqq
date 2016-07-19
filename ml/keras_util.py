@@ -143,8 +143,8 @@ class TrainingMonitor(kcb.Callback):
     def __init__(self, vgen, vsamples, mhd, key='y',
                  stagmax=2, mname='unnamed_model',
                  aeons=5, aeon_lr_factor=1/3,
-                 aeon_stag_factor=2,
-                 use_pid=False):
+                 aeon_stag_factor=2, init_lr=1e-3,
+                 save_best_train=False):
         self.vgen = vgen
         self.vsamples = vsamples
         self.mhd = mhd
@@ -157,8 +157,12 @@ class TrainingMonitor(kcb.Callback):
         self.stagmax = stagmax
         self.stagcnt = 0
 
+        self.init_lr = init_lr
+
         self.best_loss = np.inf
+        self.best_tloss = np.inf
         self.current_best_weights = None
+        self.save_best_train = save_best_train
 
         self.aeon = 0
         self.epoch = 0
@@ -180,6 +184,7 @@ class TrainingMonitor(kcb.Callback):
         super().__init__()
 
     def on_train_begin(self, logs=None):
+        K.set_value(self.model.optimizer.lr, self.init_lr)
         self.start_mark = time.time()
         print(self.begin_str
               .format('='*80,
@@ -205,12 +210,20 @@ class TrainingMonitor(kcb.Callback):
                                                       logs['size'],
                                                       self.cur_loss))
 
+        if self.save_best_train and self.cur_loss < self.best_tloss:
+            self.mhd.save_weights(self.model, mn=self.mname+'_best_train',
+                                  overwrite=True)
+
     def on_epoch_begin(self, epoch, logs=None):
         self.epoch_mark = time.time()
         self.epoch += 1
 
     def on_epoch_end(self, epoch, logs=None):
         loss = logs['val_loss']
+<<<<<<< HEAD
+=======
+        tloss = logs['loss']
+>>>>>>> 3ca0ca0ee497cfab926025333d69abe107d49da6
 
         if loss >= self.best_loss:
             self.stagcnt += 1
