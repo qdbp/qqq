@@ -1,10 +1,12 @@
 import concurrent.futures as cfu
+import functools as fun
 import os.path as osp
 import pickle as pkl
 import queue as que
 import time
 import threading
 import traceback as trc
+import sys
 
 
 def wr(*args):
@@ -140,7 +142,67 @@ def scrape(get_func, args, process_func, max_workers=64, sleep=0.05,
 
         
 
-
 def rq_json(base_url, params):
     import requests as rqs
     return rqs.get(base_url, params=params).json()
+
+
+class FunctionPrinter:
+    def __init__(self, tab_depth=4):
+        self.depth = 0
+        self.tab_depth = 4
+        self.cur_fn = None
+        self.fn_cache = {}
+
+    def decorate(self, f):
+        @fun.wraps(f)
+        def wrapped(*args, **kwargs):
+            self.depth += 1
+            sys.stdout = self
+            self.fn_cache[self.depth] = f.__name__
+            f(*args, **kwargs)
+            self.depth -= 1
+            if self.depth == 0:
+                sys.stdout = sys.__stdout__
+        return wrapped
+
+    def write(self, s):
+        sys.__stdout__.write('{}{}: {}'.format(' '*(self.depth-1)*self.tab_depth,
+                                               self.fn_cache[self.depth],
+                                               s)
+                            )
+
+    def __getattr__(self, attr):
+        return getattr(sys.__stdout__, attr)
+
+if __name__ == '__main__':
+    fp = FunctionPrinter()
+
+    @fp.decorate
+    def func():
+        sys.stdout.write('printing func!\n')
+
+    @fp.decorate
+    def gunc():
+        sys.stdout.write('printing gunc 1!\n')
+        func()
+        sys.stdout.write('printing gunc 2!\n')
+
+    @fp.decorate
+    def hunc():
+        sys.stdout.write('printing hunc 1!\n')
+        gunc()
+        junc()
+        func()
+        gunc()
+        sys.stdout.write('printing hunc 2!\n')
+
+    def junc():
+        sys.stdout.write('shit shit shit\n')
+
+    def kunc():
+        sys.stdout.write('shit shit shit\n')
+        hunc()
+        sys.stdout.write('shit shit shit\n')
+
+    kunc()
