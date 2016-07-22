@@ -154,6 +154,8 @@ class FunctionPrinter:
         self.cur_fn = None
         self.fn_cache = {}
 
+        self.fresh_line = True
+
     def decorate(self, f):
         @fun.wraps(f)
         def wrapped(*args, **kwargs):
@@ -167,10 +169,18 @@ class FunctionPrinter:
         return wrapped
 
     def write(self, s):
-        sys.__stdout__.write('{}{}: {}'.format(' '*(self.depth-1)*self.tab_depth,
-                                               self.fn_cache[self.depth],
-                                               s)
-                            )
+        if self.fresh_line:
+            sys.__stdout__.write('{}{}: {}'.format(' '*(self.depth-1)*self.tab_depth,
+                                                   self.fn_cache[self.depth],
+                                                   s)
+                                )
+        else:
+            sys.__stdout__.write(s)
+
+        if '\n' in s:
+            self.fresh_line = True
+        else:
+            self.fresh_line = False
 
     def __getattr__(self, attr):
         return getattr(sys.__stdout__, attr)
@@ -186,7 +196,10 @@ if __name__ == '__main__':
     def gunc():
         sys.stdout.write('printing gunc 1!\n')
         func()
-        sys.stdout.write('printing gunc 2!\n')
+        sys.stdout.write('printing gunc 2 without newline...')
+        sys.stdout.write('... still new stuff ...')
+        sys.stdout.write('... and done!\n') 
+        print('using print in gunc!')
 
     @fp.decorate
     def hunc():
@@ -198,11 +211,14 @@ if __name__ == '__main__':
         sys.stdout.write('printing hunc 2!\n')
 
     def junc():
-        sys.stdout.write('shit shit shit\n')
+        sys.stdout.write('unwrapped function junc!\n')
 
     def kunc():
-        sys.stdout.write('shit shit shit\n')
+        sys.stdout.write('unwrapped function kunc 1, will call hunc, junc!\n')
         hunc()
-        sys.stdout.write('shit shit shit\n')
+        junc()
+        sys.stdout.write('unwrapped function kunc 2\n')
 
     kunc()
+    print('just printing random stuff before calling gunc')
+    gunc()
