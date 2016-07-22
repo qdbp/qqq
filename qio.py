@@ -162,11 +162,12 @@ class FunctionPrinter:
             self.depth += 1
             sys.stdout = self
             self.fn_cache[self.depth] = f.__name__
-            ret = f(*args, **kwargs)
-            self.depth -= 1
-            if self.depth == 0:
-                sys.stdout = sys.__stdout__
-            return ret
+            try:
+                return f(*args, **kwargs)
+            finally:
+                self.depth -= 1
+                if self.depth == 0:
+                    sys.stdout = sys.__stdout__
         return wrapped
 
     def write(self, s):
@@ -208,6 +209,7 @@ if __name__ == '__main__':
         gunc()
         junc()
         func()
+        raise ValueError()
         gunc()
         sys.stdout.write('printing hunc 2!\n')
 
@@ -216,10 +218,12 @@ if __name__ == '__main__':
 
     def kunc():
         sys.stdout.write('unwrapped function kunc 1, will call hunc, junc!\n')
-        hunc()
+        try:
+            hunc()
+        except Exception as e:
+            print('got exception {}'.format(e))
         junc()
+        gunc()
         sys.stdout.write('unwrapped function kunc 2\n')
 
     kunc()
-    print('just printing random stuff before calling gunc')
-    gunc()
