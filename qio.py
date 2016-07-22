@@ -162,10 +162,11 @@ class FunctionPrinter:
             self.depth += 1
             sys.stdout = self
             self.fn_cache[self.depth] = f.__name__
-            f(*args, **kwargs)
+            ret = f(*args, **kwargs)
             self.depth -= 1
             if self.depth == 0:
                 sys.stdout = sys.__stdout__
+            return ret
         return wrapped
 
     def write(self, s):
