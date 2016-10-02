@@ -1,10 +1,11 @@
+from collections import deque
 import concurrent.futures as cfu
 import functools as fun
 import os.path as osp
 import pickle as pkl
 import queue as que
 import time
-import threading
+from threading import Lock
 import traceback as trc
 import sys
 
@@ -49,32 +50,51 @@ def p(fn, f, args=(), kwargs=None, d='.', ow=False, owa=(), owk=None):
         return res
 
 
-def scrape(get_func, args, process_func, max_workers=64, sleep=0.05,
-           allow_fail=[], verbose=True, mode='thread'):
+def scrape(get_func, args, process_func, max_workers=8, sleep=0.05,
+           allow_fail=[], verbose=True, mode='thread', process_args=False):
     '''
     Function to abstract a scraping process wherein a slow, parallelizable
     I/O operation feeds a fast processor. Many instances of the I/O operation
     are spawned, with their outputs fed (in arbitrary order) to the processor.
 
     Arguments:
-        get_func: function taking a single positional argument, returning
+        get_func:
+            function taking a single positional argument, returning
             an object `process_func` can accept.
-        args: list of arguments to `get_func`. A single instance will be
+        args:
+            list of arguments to `get_func`. A single instance will be
             spawned for each arg in `args`.
-        process_func: function which takes the output of `get_func` and does
+        process_func:
+            function which takes the output of `get_func` and does
             something useful with it, like storing it in a database.
-        max_workers: number of instances of `get_func` to keep spawned at
+        max_workers:
+            number of instances of `get_func` to keep spawned at
             any time.
-        sleep: time to sleep each time no data from `get_func`s is available
+        sleep:
+            time to sleep each time no data from `get_func`s is available
             for process_func
-        allow_fail: list of exception classes which when raised by a worker
+        allow_fail:
+            list of exception classes which when raised by a worker
             thread will be suppressed rather than terminate the operation.
-        verbose: whether to print allowed exceptions when they arise.
-        mode: "thread" or "process" - whether to put jobs in separate threads,
+        verbose:
+            whether to print allowed exceptions when they arise.
+        mode:
+            "thread" or "process" - whether to put jobs in separate threads,
             or separate processes. The latter may not be possible in all
-            circumstances, depending on get_function.
+            circumstances, depending on get_function. "process" also does
+            not work if `process_args` is `True`
+        process_args:
+            if `True`, `process_func` will get `(arg, get_func(arg))` as input
+            rather than just `get_func(arg)`
+
     '''
     q = que.Queue()
+
+    def pa_get_func(arg):
+        return arg, get_func(arg)
+
+    if process_args:
+        get_func = pa_get_func
 
     def queuer(arg):
         q.put(get_func(arg))
@@ -89,7 +109,8 @@ def scrape(get_func, args, process_func, max_workers=64, sleep=0.05,
     with c_exe(max_workers=max_workers) as x:
         futs = set()
         for arg in args:
-            futs.add(x.submit(queuer, arg))
+            fut = x.submit(queuer, arg)
+            futs.add(fut)
 
         while True:
             try:
@@ -110,41 +131,80 @@ def scrape(get_func, args, process_func, max_workers=64, sleep=0.05,
                     time.sleep(sleep)
 
 
-# def enqueue(get_func, max_workers=8, max_queue_size=128,
-#             mode='thread', sleep=0.05):
-#     '''
-#     Builds a queue out of a data-generating function
-#     '''
-#     q = que.Queue(maxsize=max_queue_size)
-#     stop = threading.Event()
-#     def queuer():
-#         q.put(get_func())
-# 
-#     jobs = set()
-# 
-#     if mode == 'thread':
-#         c_exe = cfu.ThreadPoolExecutor
-#     elif mode == 'process':
-#         c_exe = cfu.ProcessPoolExecutor
-#     else:
-#         raise ValueError('invalid mode {}, must be "thread" or "process"'
-#                          .format(mode))
-# 
-#     with c_exe(max_workers=max_workers) as x:
-#         while True:
-#             while len(jobs) < max_queue_size:
-#                 x.submit(queuer)
-#             new_jobs = set()
-#             for f in jobs():
-#                 if not f.done():
-#                     new_jobs.add(f)
-#             jobs = new_jobs
+class PoolThrottle:
+    '''
+    function call throttle, "X calls in Y seconds, sliding window" style
 
-        
+    constrains call flow to adhere to a "max X requests in Y seconds" schema.
+    calls made in excess of this rate will block until there is room in the
+    pool.
 
-def rq_json(base_url, params):
-    import requests as rqs
-    return rqs.get(base_url, params=params).json()
+    the canonical use case is throttling network requests
+    (i.e. `f` is `requests.get` or similar), with the time spent in GIL free IO
+    dominating the time in each call.
+    '''
+    def __init__(self, f, X, Y, res=5e-2):
+        '''
+        Args:
+            f:
+                callable which will be throttled
+            X:
+                max requests allowed in Y seconds
+            Y:
+                span of time in which X requests are allowed
+            res:
+                time resolution with which the pool is refreshed
+        '''
+        self.f = f
+        self.X = X
+        self.Y = Y
+
+        self._res = res
+        self._pool = deque([])
+        self._next_clean = 0
+
+        self._call_lock = Lock()
+        self._clean_lock = Lock()
+
+    def _clean(self):
+        # return instantly if we can't get the lock
+        clean = self._clean_lock.acquire(False)
+        if not clean:
+            return False
+        # if lock is not held by any thread we clean...
+        if clean:
+            now = time.time()
+            while True:
+                try:
+                    if self._pool[-1] < now:
+                        self._pool.pop()
+                    else:
+                        break
+                except IndexError:
+                    break
+                finally:
+                    # ... then sleep with the lock, guaranteeing
+                    # other threads' calls to _clean will return
+                    # for the duration of the sleep
+                    time.sleep(self._res)
+                    self._clean_lock.release()
+                    return True
+
+
+    def __call__(self, *args, **kwargs):
+        while True:
+            # thwart race conditions without locking call to f
+            with self._call_lock:
+                do_call = len(self._pool) < self.X
+                if do_call:
+                    self._pool.appendleft(time.time() + self.Y)
+            if do_call:
+                return self.f(*args, **kwargs)
+            else:
+                # if we're not sleeping with the clean lock
+                # we ... just sleep. all threads should sleep once.
+                if not self._clean():
+                    time.sleep(self._res)
 
 
 class FunctionPrinter:

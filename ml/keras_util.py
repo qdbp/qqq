@@ -36,62 +36,61 @@ def mk_identifier(m):
     return j, h
 
 
-class ModelHandler:
+# class ModelHandler:
+# 
+#     def __init__(self, model_path, mname):
+#         self.MODEL_ROOT = model_path
+#         self.mname = mname
+# 
+#     def get_model_path(self, m):
+#         _, h = mk_identifier(m)
+#         p = osp.join(self.MODEL_ROOT, h)
+#         os.makedirs(p, exist_ok=True)
+#         return p
+# 
+#     def get_in_model_path(self, m, fn):
+#         return osp.join(self.get_model_path(m), fn)
+# 
+#     def mk_model_name(self, m, prefix='', get_jh=False,
+#                       ext=JSON_EXT):
+#         j, h = mk_identifier(m)
+#         fn = prefix + '_' + self.mname + '.{}'.format(ext)
+#         fn = osp.join(self.get_model_path(m), fn)
+#         if get_jh:
+#             return fn, j, h
+#         else:
+#             return fn
+# 
+#     def save_model(self, m):
+#         fn, j, _ = self.mk_model_name(m, get_jh=True)
+#         with open(fn, 'w') as f:
+#             f.write(j)
+# 
+#     def load_model(self, m):
+#         fn = self.mk_model_name(m)
+#         m.from_json(fn)
+# 
+#     def save_weights(self, m, prefix='', **kwargs):
+#         fn = self.mk_model_name(m, ext=HDF5_EXT)
+#         m.save_weights(fn, **kwargs)
+# 
+#     def load_weights(self, m, in_name='best'):
+#         # TODO: slash is intentional, find better way of setting mn
+#         match = glob.glob(self.get_model_path(m) + '/' + 
+#                           '*{}*'.format(in_name) + HDF5_EXT)
+#         if len(match) > 1:
+#             print('found more than one matching model:\n{}\nloading first'
+#                   .format('\n\t'.join(match)))
+#         m.load_weights(match[0])
+# 
+#     def load_model_json(self, hsh, prefix, reset_lr=1e-3):
+#         fn = osp.join(self.MODEL_ROOT, hsh, prefix _'.'+JSON_EXT)
+#         with open(fn, 'r') as f:
+#             m = krm.model_from_json(f.read())
+#         if reset_lr:
+#             K.set_value(m.optimizer.lr, reset_lr)
+#         return m
 
-    def __init__(self, model_dir, model_root):
-        self.MODEL_ROOT = osp.join(model_dir, model_root)
-
-    def get_model_path(self, m):
-        _, h = mk_identifier(m)
-        p = osp.join(self.MODEL_ROOT, h)
-        os.makedirs(p, exist_ok=True)
-        return p
-
-    def get_in_model_path(self, m, fn):
-        return osp.join(self.get_model_path(m), fn)
-
-    def mk_model_name(self, m, mn=None, get_jh=False,
-                      ext=JSON_EXT):
-        j, h = mk_identifier(m)
-        fn = ('{}'.format(mn) if mn else '') + '.{}'.format(ext)
-        fn = osp.join(self.get_model_path(m), fn)
-        if get_jh:
-            return fn, j, h
-        else:
-            return fn
-
-    def save_model(self, m, mn=None):
-        fn, j, _ = self.mk_model_name(m, mn=mn, get_jh=True)
-        pn = self.mk_model_name(m, mn=mn, ext=PNG_EXT)
-        with open(fn, 'w') as f:
-            f.write(j)
-        
-        # kuv.plot(m, to_file=pn)
-
-    def load_model(self, m, mn=None):
-        fn = self.mk_model_name(m, mn=mn)
-        m.from_json(fn)
-
-    def save_weights(self, m, mn=None, **kwargs):
-        fn = self.mk_model_name(m, mn=mn, ext=HDF5_EXT)
-        m.save_weights(fn, **kwargs)
-
-    def load_weights(self, m, mn=None, in_name='best'):
-        # TODO: slash is intentional, find better way of setting mn
-        match = glob.glob(self.get_model_path(m) + '/' + mn +
-                          '*{}*'.format(in_name) + HDF5_EXT)
-        if len(match) > 1:
-            print('found more than one matching model:\n{}\nloading first'
-                  .format('\n\t'.join(match)))
-        m.load_weights(match[0])
-
-    def load_model_json(self, hsh, mn, reset_lr=1e-3):
-        fn = osp.join(self.MODEL_ROOT, hsh, mn+'.'+JSON_EXT)
-        with open(fn, 'r') as f:
-            m = krm.model_from_json(f.read())
-        if reset_lr:
-            K.set_value(m.optimizer.lr, reset_lr)
-        return m
 
 class PIDLearner:
     def __init__(self, base_lr, patience=1e4,
@@ -131,6 +130,7 @@ class PIDLearner:
         kill = self._i_val > self.patience
         return lr_adj, self._i_val, kill
 
+
 class TrainingMonitor(kcb.Callback):
     """
     The systemd of keras callbacks. A monolithic and
@@ -140,15 +140,9 @@ class TrainingMonitor(kcb.Callback):
 
     Planned features include and input data stream control.
     """
-    def __init__(self, vgen, vsamples, mhd, key='y',
-                 stagmax=2, mname='unnamed_model',
-                 aeons=5, aeon_lr_factor=1/3,
-                 aeon_stag_factor=2, init_lr=1e-3,
-                 save_best_train=False):
-        self.vgen = vgen
-        self.vsamples = vsamples
-        self.mhd = mhd
-        self.key = key
+    def __init__(self, stagmax=2, mname='unnamed_model',
+                 aeons=3, aeon_lr_factor=1/3,
+                 aeon_stag_factor=2, init_lr=1e-3):
         self.mname = mname
 
         self.aeons = aeons
@@ -160,9 +154,7 @@ class TrainingMonitor(kcb.Callback):
         self.init_lr = init_lr
 
         self.best_loss = np.inf
-        self.best_tloss = np.inf
         self.current_best_weights = None
-        self.save_best_train = save_best_train
 
         self.aeon = 0
         self.epoch = 0
@@ -187,12 +179,7 @@ class TrainingMonitor(kcb.Callback):
         K.set_value(self.model.optimizer.lr, self.init_lr)
         self.start_mark = time.time()
         print(self.begin_str
-              .format('='*80,
-                      self.mhd.mk_model_name(self.model,
-                                             self.mname,
-                                             get_jh=True)[2],
-                      self.aeons
-                      )
+              .format('='*80, self.mname, self.aeons)
               )
 
     def on_batch_begin(self, batch, logs=None):
@@ -210,25 +197,21 @@ class TrainingMonitor(kcb.Callback):
                                                       logs['size'],
                                                       self.cur_loss))
 
-        if self.save_best_train and self.cur_loss < self.best_tloss:
-            self.mhd.save_weights(self.model, mn=self.mname+'_best_train',
-                                  overwrite=True)
-
     def on_epoch_begin(self, epoch, logs=None):
         self.epoch_mark = time.time()
         self.epoch += 1
 
     def on_epoch_end(self, epoch, logs=None):
         loss = logs['val_loss']
-        tloss = logs['loss']
 
         if loss >= self.best_loss:
             self.stagcnt += 1
         else:
-            self.stagcnt = 0
+            self.stagcnt = max(self.stagcnt-1, 0)
             self.best_loss = loss
-            self.mhd.save_weights(self.model, mn=self.mname+'_backup',
-                                  overwrite=True)
+            self.model.save_weights(self.mname +
+                                    'a{}_best_val.hdf5'.format(self.aeon),
+                                    overwrite=True)
             self.current_best_weights = self.model.get_weights()
 
         now = time.time()
@@ -257,6 +240,5 @@ class TrainingMonitor(kcb.Callback):
 
     def save_best_weights(self):
         self.model.set_weights(self.current_best_weights)
-        self.mhd.save_weights(self.model,
-                              mn=self.mname+'_best_l:{:.3f}'
-                              .format(self.best_loss), overwrite=True)
+        self.model.save_weights(self.mname+'_best_final.hdf5',
+                                overwrite=True)

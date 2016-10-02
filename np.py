@@ -110,15 +110,16 @@ def shuffle_arrs(arrs, rs=None):
 if __name__ == "__main__":
     import numpy as np
 
-    test_arr = np.asarray(range(200))
-    test_arr = np.reshape(test_arr, (20, 10))
+    test_arr = np.asarray(range(128))
+    # test_arr = np.reshape(test_arr, (16, 2, 4, 4))
 
+    print('test array:')
     print(test_arr.shape)
     print(test_arr)
 
     
-    print('slide w{} s{} axis{}'.format(5, 3, 0))
-    t1 = sl_window(test_arr, 5, 3, axis=0)
+    print('slide w{} s{} axis{}'.format(4, 4, 0))
+    t1 = sl_window(test_arr, 4, 4, axis=0)
     print(t1.shape)
     print(t1)
 

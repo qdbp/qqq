@@ -15,14 +15,17 @@ class Timer():
     def set(self):
         self.mark = time.time()
 
+    @property
     def now(self):
         return time.time()
 
+    @property
     def elapsed(self):
         if self.mark is None:
             raise ValueError("mark not set")
-        return time.time() - self.mark()
+        return time.time() - self.mark
 
+    @property
     def lap(self):
         if self.mark is None:
             raise ValueError("mark not set")
