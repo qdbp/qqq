@@ -5,7 +5,7 @@ import os.path as osp
 import pickle as pkl
 import queue as que
 import time
-from threading import Lock
+from threading import Lock, Event
 import traceback as trc
 import sys
 
@@ -50,13 +50,24 @@ def p(fn, f, args=(), kwargs=None, d='.', ow=False, owa=(), owk=None):
         return res
 
 
-def scrape(get_func, args, process_func, max_workers=8, sleep=0.05,
-           allow_fail=[], verbose=True, mode='thread', process_args=False):
+def scrape(get_func, args, process_func, get_workers=16,
+           process_workers=4, sleep=0.05,
+           allow_fail=[], verbose=False, get_mode='thread',
+           process_mode='thread'):
     '''
-    Function to abstract a scraping process wherein a slow, parallelizable
-    I/O operation feeds a fast processor. Many instances of the I/O operation
-    are spawned, with their outputs fed (in arbitrary order) to the processor.
+    function implementing a basic asynchronous processing pipeline
 
+    a number of workers are spawned, and for each `arg` in `args`, `get_func` is
+    executed asynchronously on one of these workers.
+    
+    in a separate worker pool, `process_func` is called once on each
+    out-of-order output of the `get_func` swarm.
+
+    the control loop itself is run in a separate thread, and this function
+    returns instantly.
+    '''
+    # TODO: async process_func
+    '''
     Arguments:
         get_func:
             function taking a single positional argument, returning
@@ -67,68 +78,131 @@ def scrape(get_func, args, process_func, max_workers=8, sleep=0.05,
         process_func:
             function which takes the output of `get_func` and does
             something useful with it, like storing it in a database.
-        max_workers:
-            number of instances of `get_func` to keep spawned at
-            any time.
-        sleep:
-            time to sleep each time no data from `get_func`s is available
-            for process_func
+        get_workers:
+            maximum number of instances of `get_func` to run concurrently
+        process_workers:
+            maximum number of instances of `process_func` to run concurrently
         allow_fail:
-            list of exception classes which when raised by a worker
-            thread will be suppressed rather than terminate the operation.
+            list of exception classes which when raised by `process_func`
+            will be suppressed rather than terminate the operation.
         verbose:
             whether to print allowed exceptions when they arise.
-        mode:
+        get_mode:
             "thread" or "process" - whether to put jobs in separate threads,
             or separate processes. The latter may not be possible in all
-            circumstances, depending on get_function. "process" also does
-            not work if `process_args` is `True`
-        process_args:
-            if `True`, `process_func` will get `(arg, get_func(arg))` as input
-            rather than just `get_func(arg)`
+            circumstances, depending on get_function.
+        process_mode:
+            same as `get_mode`, but for the `process_func` pool
+        sleep:
+            time to sleep each time no data from `get_func`s is available
+            for process_func.
+    Returns:
+        halt:
+            `Event` handle. setting it to `True` with `halt.set()` will order
+            the processing loop to cancel all pending instances of `get_func`
+            and to shut down. instances of `get_func` which are running when
+            `halt` is set will finish, but will **not** be processed!
 
+            any pending `process_func` processes, however, will be allowed to
+            run to completion. this is in line with the philosophy that
+            `process_func` handles the caller's bookkeeping and should be run
+            to maintain consistent books.
+        futs:
+            a set containing all the `concurrent.futures.Future`-wrapped
+            instances of `get_func`, one per `arg` in `args`
     '''
-    q = que.Queue()
 
-    def pa_get_func(arg):
-        return arg, get_func(arg)
+    assert all([issubclass(e, Exception) for e in allow_fail])
+    # simplifies the processing loop
+    allow_fail.append(cfu.CancelledError)
 
-    if process_args:
-        get_func = pa_get_func
-
-    def queuer(arg):
-        q.put(get_func(arg))
-
-    if mode == 'thread':
-        c_exe = cfu.ThreadPoolExecutor
-    elif mode == 'process':
-        c_exe = cfu.ProcessPoolExecutor
+    if get_mode == 'thread':
+        get_exe = cfu.ThreadPoolExecutor
+    elif get_mode == 'process':
+        get_exe = cfu.ProcessPoolExecutor
     else:
         raise ValueError('invalid mode {}'.format(mode))
 
-    with c_exe(max_workers=max_workers) as x:
-        futs = set()
-        for arg in args:
-            fut = x.submit(queuer, arg)
-            futs.add(fut)
+    if process_mode == 'thread':
+        px_exe = cfu.ThreadPoolExecutor
+    elif process_mode == 'process':
+        px_exe = cfu.ProcessPoolExecutor
+    else:
+        raise ValueError('invalid mode {}'.format(mode))
 
-        while True:
-            try:
-                res = q.get_nowait()
-                try:
-                    process_func(res)
-                except Exception as e:
-                    if verbose:
-                        trc.print_exc()
-                    if not type(e) in allow_fail:
-                        for f in futs:
-                            f.cancel()
+    q = que.Queue()
+    futs = set()
+    halt = Event()
+
+    pfuts = deque([])
+    
+    gx = get_exe(max_workers=get_workers)
+    px = px_exe(max_workers=process_workers)
+    lx = cfu.ThreadPoolExecutor(max_workers=1)
+    # executor for the processing loop, always threaded
+
+    def _shutdown():
+        if verbose:
+            print('shutting down scraper')
+        for f in futs:
+            f.cancel()
+        # we do not cancel processing futures, however
+        gx.shutdown(False)
+        px.shutdown(False)
+        lx.shutdown(False)
+    
+    def queuer(arg):
+        q.put(get_func(arg))
+
+    def process_loop():
+        try:
+            while not halt.is_set():
+                while not q.empty():
+                    pfuts.appendleft(px.submit(process_func, q.get()))
+
+                # if we have nothing to process, and the getter is also done
+                # we're done
+                if len(pfuts) == 0 and all([f.done() for f in futs]):
+                    # not break to keep halt in a consistent state
+                    halt.set()
+                    continue
+
+                # barrier
+                pfuts.appendleft(None)
+                while True:
+                    pfut = pfuts.pop()
+                    if pfut is None:
                         break
-            except que.Empty:
-                if all(f.done() for f in futs):
-                    return
-                else:
-                    time.sleep(sleep)
+                    try:
+                        _ = pfut.result(timeout=0)
+                    # pending or running, keep it in the queue
+                    except cfu.TimeoutError:
+                        pfuts.appendleft(pfut)
+                    # cancelled or failed as allowed, implicitly drop it
+                    except Exception as e:
+                        # nothing to see here
+                        if type(e) in allow_fail:
+                            continue
+                        # uhoh
+                        print('fatal: disallowed exception')
+                        trc.print_exc()
+                        halt.set()
+                        break
+                    except KeyboardInterrupt:
+                        print('user shutdown')
+                        halt.set()
+                        break
+
+                time.sleep(sleep)
+        finally:
+            _shutdown()
+
+    for arg in args:
+        futs.add(gx.submit(queuer, arg))
+
+    lx.submit(process_loop)
+
+    return halt, futs
 
 
 class PoolThrottle:
