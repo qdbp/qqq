@@ -3,9 +3,9 @@ import concurrent.futures as cfu
 import functools as fun
 import os.path as osp
 import pickle as pkl
-import queue as que
+from queue import Queue, Empty
 import time
-from threading import Lock, Event
+from threading import Lock, RLock, Event
 import traceback as trc
 import sys
 
@@ -50,6 +50,165 @@ def p(fn, f, args=(), kwargs=None, d='.', ow=False, owa=(), owk=None):
         return res
 
 
+# class MergeQueue:
+#     '''
+#     class merging multiple `queue.Queue` objects into one
+#     '''
+
+class Scraper:
+    '''
+    class implemented a basic asynchronous processing pipeline
+    '''
+    def __init__(self, input_q, work_func, output_q=None, halt_on_empty=True,
+                 workers=16, use_processes=False,
+                 collect_output=True, allow_fail=None, verbose=False):
+        '''
+        a number of workers are spawned, and for each `arg` in `args`,
+        `get_func` is executed asynchronously on one of these workers.
+
+        in a separate worker pool, `process_func` is called once on each
+        out-of-order output of the `get_func` swarm.
+
+        the control loop itself is run in a separate thread, and this function
+        returns instantly.
+
+        Arguments:
+            input_q:
+                a `queue.Queue` instance, or an iterable. if iterable, all of
+                its elemented will be added to a new `queue.Queue` instance
+                accessible as `scraper.input_q`.
+                this is the way the scraper instance receives work to do.
+                `input_q` will be polled, and its contents gotten and fed into
+                `worker_func`
+            work_func:
+                function to be called once for each argument passed to the
+                object through `add_arg` or `add_args`.
+            workers:
+                maximum number of instances of `work_func` to be run together.
+            allow_fail:
+                list of exception classes which when raised by `work_func`
+                will be suppressed rather than terminate the operation.
+            verbose:
+                whether to print allowed exceptions when they arise.
+            use_processes:
+                if `True`, `work_func` workers run in separate processes. else,
+                they run in separate threads. may not work with all types of
+                `work_func` if `True`.
+            halt_on_empty:
+                if `True`, the scraper will shut down when all arguments have
+                been exhausted. once shutdown is triggered, adding more
+                arguments to the input queue will not restart the scraper
+            collect_output:
+                if `True`, the return values of `work_func` will be made
+                available, in order of completion. should be set to False
+                if `work_func` operates through side effects exclusively.
+                if `True`, the return values of `work_func` can be accessed
+                through `scraper.outs_q`
+        '''
+
+        self.f = work_func
+        self.workers = workers
+
+        if allow_fail is None:
+            allow_fail = []
+        else:
+            assert all([issubclass(e, Exception) for e in allow_fail])
+        # simplifies the processing loop
+        allow_fail.append(cfu.CancelledError)
+        self.allow_fail = allow_fail
+
+        self.verbose = verbose
+
+        if use_processes:
+            _work_exe = cfu.ProcessPoolExecutor
+        else:
+            _work_exe = cfu.ThreadPoolExecutor
+
+        if isinstance(input_q, Queue):
+            self.input_q = input_q
+        else:
+            self.input_q = Queue()
+            for arg in input_q:
+                self.input_q.put(arg)
+
+        # not Queue so we can use cfu.wait then set difference with 'done'
+        self._wfut_s = set()
+        self._wfut_lock = RLock()
+
+        if output_q is not None:
+            assert isinstance(output_q, Queue)
+        elif collect_output:
+            self.output_q = Queue()
+        else:
+            self.output_q = None
+        self.collect_output = collect_output
+
+        self._wx = _work_exe(max_workers=self.workers)
+
+        # processing loop executors, always threaded
+        self._in_x = cfu.ThreadPoolExecutor(max_workers=1)
+        self._out_x = cfu.ThreadPoolExecutor(max_workers=1)
+
+        self._halt = Event()
+        self.halt_on_empty = halt_on_empty
+        self._halt_primed = False
+
+        self._sleep_in = 1
+        self._sleep_out = 1
+
+        # run right on startup
+        self._in_x.submit(self._in_loop)
+        self._out_x.submit(self._out_loop)
+
+    def halt(self):
+        self._halt.set()
+        if self.verbose:
+            print('shutting down scraper')
+        with self._wfut_lock:
+            for f in self._wfut_s:
+                f.cancel()
+        self._wx.shutdown(True)
+        self._in_x.shutdown(True)
+        self._out_x.shutdown(True)
+
+    def _in_loop(self):
+        while not self._halt.is_set():
+            try:
+                if not self._halt_primed:
+                    arg = self.input_q.get(timeout=self._sleep_in)
+                    wf = self._wx.submit(self.f, arg)
+                    with self._wfut_lock:
+                        self._wfut_s.add(wf)
+            except Empty:
+                if self.halt_on_empty:
+                    self._halt_primed = True
+            except Exception:
+                print('warning: unexpected exception in _in_loop',
+                      file=sys.stderr)
+
+    def _out_loop(self):
+        while not self._halt.is_set():
+            with self._wfut_lock:
+                done, _ = cfu.wait(self._wfut_s, timeout=0)
+                self._wfut_s -= done
+                if len(self._wfut_s) == 0 and self._halt_primed:
+                    self.halt()
+            for wf in done:
+                try:
+                    res = wf.result(timeout=0)
+                    if self.collect_output:
+                        self.output_q.put(res)
+                except Exception as e:
+                    if all([not isinstance(e, af) for af in self.allow_fail]):
+                        print('fatal: disallowed exception')
+                        trc.print_exc()
+                        self.halt()
+                        break
+                    elif self.verbose:
+                        print('allowed exception raised:')
+                        trc.print_exc()
+
+
 def scrape(get_func, args, process_func, get_workers=16,
            process_workers=4, sleep=0.05,
            allow_fail=[], verbose=False, get_mode='thread',
@@ -65,9 +224,6 @@ def scrape(get_func, args, process_func, get_workers=16,
 
     the control loop itself is run in a separate thread, and this function
     returns instantly.
-    '''
-    # TODO: async process_func
-    '''
     Arguments:
         get_func:
             function taking a single positional argument, returning
@@ -132,7 +288,10 @@ def scrape(get_func, args, process_func, get_workers=16,
 
     q = que.Queue()
     futs = set()
+
     halt = Event()
+    re_init = Event()
+    re_init.set()
 
     pfuts = deque([])
     
@@ -155,8 +314,18 @@ def scrape(get_func, args, process_func, get_workers=16,
         q.put(get_func(arg))
 
     def process_loop():
+        nonlocal futs
         try:
             while not halt.is_set():
+
+                # (re)initialize the worker tast set
+                # run once when scrape is called
+                # can be called again
+                if re_init.is_set():
+                    futs.clear()
+                    for arg in args:
+                        futs.add(gx.submit(queuer, arg))
+
                 while not q.empty():
                     pfuts.appendleft(px.submit(process_func, q.get()))
 
