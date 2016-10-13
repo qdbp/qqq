@@ -50,17 +50,116 @@ def p(fn, f, args=(), kwargs=None, d='.', ow=False, owa=(), owk=None):
         return res
 
 
-# class MergeQueue:
-#     '''
-#     class merging multiple `queue.Queue` objects into one
-#     '''
+class SplitQueue:
+    '''
+    class splitting multiplt `queue.Queue` objects into several
+    '''
+    def __init__(self, input_q, n_branches, cond_func, halt=None):
+        '''
+        Arguments:
+            n_branches:
+                number of output queues to split into. these queues are stored
+                in a dict `output_qs` with integer keys in [0, `n_branches`)
+            cont_func:
+                function taking an object found in the input queue `input_q`
+                and returning an integer [0, `n_branches`). this integer gives
+                the key of output queue into which the object should be sorted.
+            halt:
+                a `threading.Event` object. when set, the loop will shut down.
+                if `None`, a new internal `Event` will be instantiated. the
+                splitqueue can still be shut down using the `halt` method.
+        '''
+        self.input_q = input_q
+        self.n_branches = n_branches
+        self.cond_func = cond_func
+
+        self.output_qs = {i: Queue() for i in range(n_branches)}
+
+        self._loop_x = cfu.ThreadPoolExecutor(max_workers=1)
+
+        if halt is None:
+            self._halt = Event()
+        else:
+            assert isinstance(halt, Event)
+            self._halt = halt
+
+        self._loop_x.submit(self._loop)
+
+    def halt(self):
+        '''
+        shut down the split queue
+        '''
+        self._halt.set()
+        self._loop_q.shutdown(False)
+
+    def _loop(self):
+        while not self._halt.is_set():
+            obj = self.input_q.get()
+            k = self.cond_func(obj)
+            self.output_qs[k].put(obj)
+
+    def __getitem__(self, key):
+        '''
+        to support eas(ier) named assignment, e.g.:
+
+        >>> first, second = SplitQueue(in, 2, cond)[:]
+        '''
+        t = tuple(self.output_qs[i] for i in range(self.n_branches))
+        return t.__getitem__(key)
+
+
+class MergeQueue:
+    '''
+    class merging multiple `queue.Queue` objects into one
+
+    relative order of objects within any input queue is preserved in the output
+    queue
+    '''
+    def __init__(self, input_qs, halt=None):
+        '''
+        Arguments:
+            input_qs:
+                `queue.Queue` objects which to aggregate
+            halt:
+                a `threading.Event` object. when set, the loop will shut down.
+                if `None`, a new internal `Event` will be instantiated. the
+                splitqueue can still be shut down using the `halt` method.
+        '''
+        assert all([isinstance(iq, Queue) for iq in input_qs])
+        self.input_qs = input_qs
+        self.output_q = Queue()
+        self._loop_x = cfu.ThreadPoolExecutor(max_workers=1)
+
+        if halt is None:
+            self._halt = Event()
+        else:
+            assert isinstance(halt, Event)
+            self._halt = halt
+            
+        self._poll_lag = 0.05
+
+        # start on instantiation
+        self._loop_x.submit(self._loop)
+
+    def halt(self):
+        self._halt.set()
+        self._loop_x.shutdown(False)
+
+    def _loop(self):
+        while not self._halt.is_set():
+            for iq in self.input_qs:
+                while True:
+                    try:
+                        self.output_q.put(iq.get(timeout=self._poll_lag))
+                    except Empty:
+                        break
 
 class Scraper:
     '''
     class implemented a basic asynchronous processing pipeline
     '''
     def __init__(self, input_q, work_func, output_q=None, halt_on_empty=True,
-                 workers=16, use_processes=False,
+                 workers=16, use_processes=False, halt=None,
                  collect_output=True, allow_fail=None, verbose=False):
         '''
         a number of workers are spawned, and for each `arg` in `args`,
@@ -88,6 +187,10 @@ class Scraper:
             allow_fail:
                 list of exception classes which when raised by `work_func`
                 will be suppressed rather than terminate the operation.
+            halt:
+                a `threading.Event` object. when set, the loop will shut down.
+                if `None`, a new internal `Event` will be instantiated. the
+                splitqueue can still be shut down using the `halt` method.
             verbose:
                 whether to print allowed exceptions when they arise.
             use_processes:
@@ -137,6 +240,7 @@ class Scraper:
 
         if output_q is not None:
             assert isinstance(output_q, Queue)
+            self.output_q = output_q
         elif collect_output:
             self.output_q = Queue()
         else:
@@ -149,16 +253,22 @@ class Scraper:
         self._in_x = cfu.ThreadPoolExecutor(max_workers=1)
         self._out_x = cfu.ThreadPoolExecutor(max_workers=1)
 
-        self._halt = Event()
+        if halt is None:
+            self._halt = Event()
+        else:
+            assert isinstance(halt, Event)
+            self._halt = halt
+
         self.halt_on_empty = halt_on_empty
         self._halt_primed = False
 
-        self._sleep_in = 1
+        self._sleep_in = 0.2
         self._sleep_out = 1
 
-        # run right on startup
+    def run(self):
         self._in_x.submit(self._in_loop)
         self._out_x.submit(self._out_loop)
+        return self
 
     def halt(self):
         self._halt.set()
@@ -175,16 +285,21 @@ class Scraper:
         while not self._halt.is_set():
             try:
                 if not self._halt_primed:
-                    arg = self.input_q.get(timeout=self._sleep_in)
+                    arg = self.input_q.get_nowait()
                     wf = self._wx.submit(self.f, arg)
                     with self._wfut_lock:
                         self._wfut_s.add(wf)
             except Empty:
                 if self.halt_on_empty:
                     self._halt_primed = True
+                time.sleep(self._sleep_in)
             except Exception:
                 print('warning: unexpected exception in _in_loop',
                       file=sys.stderr)
+        else:
+            # ensure shutdown code is run if halt is triggered through shared
+            # passed Event
+            self.halt()
 
     def _out_loop(self):
         while not self._halt.is_set():
@@ -207,6 +322,10 @@ class Scraper:
                     elif self.verbose:
                         print('allowed exception raised:')
                         trc.print_exc()
+        else:
+            # ensure shutdown code is run if halt is triggered through shared
+            # passed Event
+            self.halt()
 
 
 def scrape(get_func, args, process_func, get_workers=16,
