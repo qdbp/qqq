@@ -9,6 +9,8 @@ from threading import Lock, RLock, Event
 import traceback as trc
 import sys
 
+from qqq.util import Sync
+
 
 def wr(*args):
     '''
@@ -153,6 +155,7 @@ class MergeQueue:
                         self.output_q.put(iq.get(timeout=self._poll_lag))
                     except Empty:
                         break
+
 
 class Scraper:
     '''
@@ -522,10 +525,11 @@ class PoolThrottle:
         self.Y = Y
 
         self._res = res
-        self._pool = deque([])
-        self._next_clean = 0
+        self._pool = Sync(deque([]))
+        self._ifl = 0
 
         self._call_lock = Lock()
+        self._ifl
         self._clean_lock = Lock()
 
     def _clean(self):
