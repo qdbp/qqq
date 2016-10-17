@@ -7,7 +7,8 @@ import threading
 import numpy.random as npr
 import pytest
 
-from qqq.qio import Scraper, SplitQueue, MergeQueue
+from qqq.qio import Scraper, SplitQueue
+from qqq.qio import FunctionPrinter
 
 
 def test_collatz():
@@ -54,6 +55,47 @@ def test_collatz():
     halt.set()
 
     assert len(outputs) == 24
+
+# def test_functionprinter():
+#     fp = FunctionPrinter()
+# 
+#     @fp.decorate
+#     def func():
+#         sys.stdout.write('printing func!\n')
+# 
+#     @fp.decorate
+#     def gunc():
+#         sys.stdout.write('printing gunc 1!\n')
+#         func()
+#         sys.stdout.write('printing gunc 2 without newline...')
+#         sys.stdout.write('... still new stuff ...')
+#         sys.stdout.write('... and done!\n') 
+#         print('using print in gunc!')
+# 
+#     @fp.decorate
+#     def hunc():
+#         sys.stdout.write('printing hunc 1!\n')
+#         gunc()
+#         junc()
+#         func()
+#         raise ValueError()
+#         gunc()
+#         sys.stdout.write('printing hunc 2!\n')
+# 
+#     def junc():
+#         sys.stdout.write('unwrapped function junc!\n')
+# 
+#     def kunc():
+#         sys.stdout.write('unwrapped function kunc 1, will call hunc, junc!\n')
+#         try:
+#             hunc()
+#         except Exception as e:
+#             print('got exception {}'.format(e))
+#         junc()
+#         gunc()
+#         sys.stdout.write('unwrapped function kunc 2\n')
+
+    kunc()
 
 if __name__ == '__main__':
     pytest.main([__file__])

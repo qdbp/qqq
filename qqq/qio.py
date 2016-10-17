@@ -5,11 +5,11 @@ import os.path as osp
 import pickle as pkl
 from queue import Queue, Empty
 import time
-from threading import Lock, RLock, Event
+from threading import Lock, RLock, Event, Thread
 import traceback as trc
 import sys
 
-from qqq.util import Sync
+import lxml
 
 
 def wr(*args):
@@ -56,7 +56,8 @@ class SplitQueue:
     '''
     class splitting multiplt `queue.Queue` objects into several
     '''
-    def __init__(self, input_q, n_branches, cond_func, halt=None):
+    def __init__(self, input_q, n_branches, cond_func,
+                 halt=None, _debug=False):
         '''
         Arguments:
             n_branches:
@@ -70,6 +71,9 @@ class SplitQueue:
                 a `threading.Event` object. when set, the loop will shut down.
                 if `None`, a new internal `Event` will be instantiated. the
                 splitqueue can still be shut down using the `halt` method.
+
+                warning: if using a shared event object `e`, this will
+                propagate the halt signal to all other object using `e`
         '''
         self.input_q = input_q
         self.n_branches = n_branches
@@ -77,28 +81,31 @@ class SplitQueue:
 
         self.output_qs = {i: Queue() for i in range(n_branches)}
 
-        self._loop_x = cfu.ThreadPoolExecutor(max_workers=1)
-
         if halt is None:
             self._halt = Event()
         else:
             assert isinstance(halt, Event)
             self._halt = halt
 
-        self._loop_x.submit(self._loop)
+        self._debug = _debug
+
+        Thread(target=self._loop, daemon=True, name='split_loop').start()
 
     def halt(self):
         '''
         shut down the split queue
         '''
         self._halt.set()
-        self._loop_q.shutdown(False)
 
     def _loop(self):
         while not self._halt.is_set():
-            obj = self.input_q.get()
-            k = self.cond_func(obj)
-            self.output_qs[k].put(obj)
+            try:
+                obj = self.input_q.get(timeout=0.2)
+                k = self.cond_func(obj)
+                self.output_qs[k].put(obj)
+            except Empty:
+                print('empty', self._halt.is_set())
+                continue
 
     def __getitem__(self, key):
         '''
@@ -130,7 +137,6 @@ class MergeQueue:
         assert all([isinstance(iq, Queue) for iq in input_qs])
         self.input_qs = input_qs
         self.output_q = Queue()
-        self._loop_x = cfu.ThreadPoolExecutor(max_workers=1)
 
         if halt is None:
             self._halt = Event()
@@ -140,12 +146,10 @@ class MergeQueue:
             
         self._poll_lag = 0.05
 
-        # start on instantiation
-        self._loop_x.submit(self._loop)
+        Thread(target=self._loop, daemon=True).start()
 
     def halt(self):
         self._halt.set()
-        self._loop_x.shutdown(False)
 
     def _loop(self):
         while not self._halt.is_set():
@@ -161,7 +165,8 @@ class Scraper:
     '''
     class implemented a basic asynchronous processing pipeline
     '''
-    def __init__(self, input_q, work_func, output_q=None, halt_on_empty=True,
+    def __init__(self, input_q, work_func, output_q=None, collect_output=True,
+                 ignore_none=True, halt_on_empty=True,
                  workers=16, use_processes=False, halt=None,
                  collect_output=True, allow_fail=None, verbose=False):
         '''
@@ -210,6 +215,9 @@ class Scraper:
                 if `work_func` operates through side effects exclusively.
                 if `True`, the return values of `work_func` can be accessed
                 through `scraper.outs_q`
+            ignore_none:
+                if `True`, `None` return values will not be put in the
+                output queue, and will be tacitly dropped instead.
         '''
 
         self.f = work_func
@@ -249,12 +257,9 @@ class Scraper:
         else:
             self.output_q = None
         self.collect_output = collect_output
+        self.ignore_none = ignore_none
 
         self._wx = _work_exe(max_workers=self.workers)
-
-        # processing loop executors, always threaded
-        self._in_x = cfu.ThreadPoolExecutor(max_workers=1)
-        self._out_x = cfu.ThreadPoolExecutor(max_workers=1)
 
         if halt is None:
             self._halt = Event()
@@ -262,15 +267,17 @@ class Scraper:
             assert isinstance(halt, Event)
             self._halt = halt
 
-        self.halt_on_empty = halt_on_empty
-        self._halt_primed = False
-
         self._sleep_in = 0.2
-        self._sleep_out = 1
+        self._sleep_out = 0.2
+
+        self._in_t = Thread(target=self._in_loop, daemon=True,
+                            name='scraper_in')
+        self._out_t = Thread(target=self._out_loop, daemon=True,
+                             name='scraper_out')
 
     def run(self):
-        self._in_x.submit(self._in_loop)
-        self._out_x.submit(self._out_loop)
+        self._in_t.start()
+        self._out_t.start()
         return self
 
     def halt(self):
@@ -281,40 +288,31 @@ class Scraper:
             for f in self._wfut_s:
                 f.cancel()
         self._wx.shutdown(True)
-        self._in_x.shutdown(True)
-        self._out_x.shutdown(True)
 
     def _in_loop(self):
         while not self._halt.is_set():
             try:
-                if not self._halt_primed:
-                    arg = self.input_q.get_nowait()
-                    wf = self._wx.submit(self.f, arg)
-                    with self._wfut_lock:
-                        self._wfut_s.add(wf)
+                arg = self.input_q.get_nowait()
+                wf = self._wx.submit(self.f, arg)
+                with self._wfut_lock:
+                    self._wfut_s.add(wf)
             except Empty:
-                if self.halt_on_empty:
-                    self._halt_primed = True
                 time.sleep(self._sleep_in)
             except Exception:
                 print('warning: unexpected exception in _in_loop',
                       file=sys.stderr)
         else:
-            # ensure shutdown code is run if halt is triggered through shared
-            # passed Event
             self.halt()
 
     def _out_loop(self):
         while not self._halt.is_set():
             with self._wfut_lock:
-                done, _ = cfu.wait(self._wfut_s, timeout=0)
+                done, pend = cfu.wait(self._wfut_s, timeout=0)
                 self._wfut_s -= done
-                if len(self._wfut_s) == 0 and self._halt_primed:
-                    self.halt()
             for wf in done:
                 try:
                     res = wf.result(timeout=0)
-                    if self.collect_output:
+                    if self.collect_output and not (self.ignore_none and res is None):
                         self.output_q.put(res)
                 except Exception as e:
                     if all([not isinstance(e, af) for af in self.allow_fail]):
@@ -325,11 +323,12 @@ class Scraper:
                     elif self.verbose:
                         print('allowed exception raised:')
                         trc.print_exc()
+            time.sleep(self._sleep_out)
         else:
-            # ensure shutdown code is run if halt is triggered through shared
-            # passed Event
             self.halt()
 
+
+        
 
 def scrape(get_func, args, process_func, get_workers=16,
            process_workers=4, sleep=0.05,
@@ -525,7 +524,7 @@ class PoolThrottle:
         self.Y = Y
 
         self._res = res
-        self._pool = Sync(deque([]))
+        self._pool = deque([])
         self._ifl = 0
 
         self._call_lock = Lock()
@@ -612,44 +611,3 @@ class FunctionPrinter:
 
     def __getattr__(self, attr):
         return getattr(sys.__stdout__, attr)
-
-if __name__ == '__main__':
-    fp = FunctionPrinter()
-
-    @fp.decorate
-    def func():
-        sys.stdout.write('printing func!\n')
-
-    @fp.decorate
-    def gunc():
-        sys.stdout.write('printing gunc 1!\n')
-        func()
-        sys.stdout.write('printing gunc 2 without newline...')
-        sys.stdout.write('... still new stuff ...')
-        sys.stdout.write('... and done!\n') 
-        print('using print in gunc!')
-
-    @fp.decorate
-    def hunc():
-        sys.stdout.write('printing hunc 1!\n')
-        gunc()
-        junc()
-        func()
-        raise ValueError()
-        gunc()
-        sys.stdout.write('printing hunc 2!\n')
-
-    def junc():
-        sys.stdout.write('unwrapped function junc!\n')
-
-    def kunc():
-        sys.stdout.write('unwrapped function kunc 1, will call hunc, junc!\n')
-        try:
-            hunc()
-        except Exception as e:
-            print('got exception {}'.format(e))
-        junc()
-        gunc()
-        sys.stdout.write('unwrapped function kunc 2\n')
-
-    kunc()
