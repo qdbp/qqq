@@ -168,7 +168,7 @@ class Scraper:
     def __init__(self, input_q, work_func, output_q=None, collect_output=True,
                  ignore_none=True, halt_on_empty=True,
                  workers=16, use_processes=False, halt=None,
-                 collect_output=True, allow_fail=None, verbose=False):
+                 allow_fail=None, verbose=False):
         '''
         a number of workers are spawned, and for each `arg` in `args`,
         `get_func` is executed asynchronously on one of these workers.

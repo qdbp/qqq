@@ -12,12 +12,14 @@ class HTMLCutter:
     '''
     cuts up a top-level xml document to extract desired information
     '''
+    # TODO: constants rather than magic strings
     ops = {'xpath': ['xp'],
            'strip': ['st'],
            'text': ['tx'],
            'regex': ['regexp', 're'],
            'select': ['sel']}
 
+    # TODO: constants rather than magic strings
     sigs = {'xpath_tree': ('etree', 'etree'),
             'xpath_prop': ('etree', 'unicode'),
             'strip': ('etree', 'etree'),
@@ -31,11 +33,6 @@ class HTMLCutter:
         self._validate_opseq()
 
     def _validate_opseq(self):
-        # canonical name: [distinct aliases]
-        # iff str in keys U join(values) it is a valid op
-        # recognized type: valid ops on type
-        # iff str in keys, it is a valid type
-        cur_type = 'etree'
         new_opseq = []
 
         # canonicalize ops
@@ -45,14 +42,14 @@ class HTMLCutter:
                 if op == k or op in v:
                     c_op = k
                     break
+            if c_op is None:
+                raise ValueError('invalid op {} detected in opseq'.format(op))
             new_opseq.append((c_op, arg))
             self.opseq = new_opseq
 
         # validate types
+        cur_type = 'etree'
         for opx, (c_op, arg) in enumerate(self.opseq):
-            if c_op is None:
-                raise ValueError('invalid op {} detected in opseq'.format(op))
-
             # polymorphism expansion
             if c_op == 'regex':
                 arg = re.compile(arg)
@@ -73,6 +70,10 @@ class HTMLCutter:
             # basic argument validation
             if c_op == 'select':
                 assert isinstance(arg, int)
+            if c_op == 'xpath':
+                x = fromstring('<html></html>')
+                # should crash with malformed xpath
+                x.xpath(arg)
 
             expect_type = self.sigs[sig_op][0]
             if cur_type != expect_type:
@@ -144,12 +145,13 @@ class WebScraper:
                 internall to fetch the web pages.
         '''
 
+        self.rig = {re.compile(k): v for k, v in mining_rig.items()}
+
         self.urls_q = Queue()
-        self.urls_q.put(seed_url)
+        self.urls_q.put((seed_url, self.rig[self._get_cutter(seed_url)]))
 
         self.output_q = Queue()
 
-        self.mining_rig = {re.compile(k): v for k, v in mining_rig.items()}
         self._scr = Scraper(self.urls_q, self._crawl, output_q=self.output_q,
                             **kwargs)
 
@@ -159,6 +161,11 @@ class WebScraper:
 
     def run(self):
         self._scr.run()
+
+    def _get_cutter(self, url):
+        for urx in sorted(self.rig.keys(), key=lambda x: -len(x.pattern)):
+            if urx.match(url):
+                return urx
 
     def _add_urls(self, urls, cutter_dict):
         with self._crl_lock:
@@ -171,8 +178,8 @@ class WebScraper:
         url, cutter_dict = url_cutter_dict
 
         html = rqs.get(url).text
-        for urx in sorted(self.mining_rig.keys(), key=len, reverse=True):
-            self._add_urls(urx.findall(html), self.mining_rig[urx])
+        for urx in sorted(self.rig.keys(), key=lambda x: -len(x.pattern)):
+            self._add_urls(urx.findall(html), self.rig[urx])
 
         if cutter_dict:
             out = {k: v.cut(html) for k, v in cutter_dict.items()}

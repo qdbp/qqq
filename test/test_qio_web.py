@@ -3,6 +3,7 @@ import os
 import pytest 
 
 from qqq.qio_web import HTMLCutter
+from lxml.etree import XPathEvalError
 
 
 def test_htmlcutter():
@@ -43,6 +44,13 @@ def test_htmlcutter():
            ('sel', 1)]
     state = HTMLCutter(opc).cut(s)
     assert all([s == 'a' for s in state])
+
+    opc1 = [('xpath', '//p[@fail="fail]')]
+    opc2 = [('xpath', '//p[@fail="fail"')]
+    with pytest.raises(XPathEvalError):
+        HTMLCutter(opc1)
+    with pytest.raises(XPathEvalError):
+        HTMLCutter(opc2)
 
 
 if __name__ == '__main__':
