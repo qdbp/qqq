@@ -332,8 +332,6 @@ class Scraper:
             self.halt()
 
 
-        
-
 def scrape(get_func, args, process_func, get_workers=16,
            process_workers=4, sleep=0.05,
            allow_fail=[], verbose=False, get_mode='thread',
