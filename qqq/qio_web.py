@@ -13,6 +13,7 @@ Classes:
 
             >>> wc = HTMLCutter([(HTMLCutter.XPATH, '//p[@class="main-text"]'),
             ...                  (HTMLCutter.STRIP, 'a'),
+            ...                  (HTMLCutter.TEXT, ''),
             ...                  (HTMLCutter.REGEX, '[A-Z][a-z]+')]
             >>> wc.cut(rqs.get('www.example.com').text)
 
@@ -99,7 +100,7 @@ class HTMLCutter:
                 corresponding to a tag.
             HTMLCutter.TEXT:
                 the state should be a list of `Etree` elements. extracts
-                the `.text` of each of these
+                the `.text` of each of these. ignores the `oparg`.
             HTMLCutter.REGEX:
                 the state should be unicode strings. applies the regexp
                 given in the `oparg` to each. if it has two or more
