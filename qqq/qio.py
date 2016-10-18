@@ -163,7 +163,7 @@ class MergeQueue:
 
 class Scraper:
     '''
-    class implemented a basic asynchronous processing pipeline
+    class implementing a basic asynchronous processing pipeline
     '''
     def __init__(self, input_q, work_func, output_q=None, collect_output=True,
                  ignore_none=True, halt_on_empty=True,
@@ -171,13 +171,17 @@ class Scraper:
                  allow_fail=None, verbose=False):
         '''
         a number of workers are spawned, and for each `arg` in `args`,
-        `get_func` is executed asynchronously on one of these workers.
+        `work_func` is executed asynchronously on one of these workers.
 
-        in a separate worker pool, `process_func` is called once on each
-        out-of-order output of the `get_func` swarm.
+        the control loops are run in a separate thread, and all workers are
+        daemonic. this means that invocation of `run` return does not block,
+        and work will be aborted if the main threads returns.
 
-        the control loop itself is run in a separate thread, and this function
-        returns instantly.
+        no verification of what work has actually completed is implemented.
+        this might be changed in the future if compelling cases where such
+        logic cannot be feasibly implemented in work_func itself (for instance
+        where there is some nontrivial cost to invoking work_func on a given
+        argument more than once, even across different program invocations).
 
         Arguments:
             input_q:

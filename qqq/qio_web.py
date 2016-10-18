@@ -119,7 +119,7 @@ class HTMLCutter:
 
 
 class WebScraper:
-    def __init__(self, seed_url, mining_rig, **kwargs):
+    def __init__(self, seed_url, mining_rig, scraped_file='scraped.p', **kwargs):
         '''
         Arguments:
             seed_url:
