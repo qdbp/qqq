@@ -189,68 +189,76 @@ class HTMLCutter:
 
 
 class WebScraper:
-    def __init__(self, seed_url, mining_rig, scraped_file='scraped.p', **kwargs):
+    def __init__(self, seed_url, callbacks, crawled=None, **kwargs):
         '''
+        Notation:
+            URX:
+                "URL regular expression", a regular expression matching certain
+                crawlable URLs.
         Arguments:
             seed_url:
                 url from which crawling begins
-            mining_rig:
-                dictionary, {urx: None|{key: HTMLCutters}}.
+            callbacks:
+                a dictionary, keyed by URXs. each new URL will be matched to
+                the most specific, as determined by pattern length, URX which
+                matches it. the callback keyed by this URX will then be called
+                on the HTML content fetched from the URL, provided it can be
+                retrieved successfully.
 
-                URLs matched by the keys of this dictionary will be crawled.
-                furthermore, those mapping to non-`None`/empty values will
-                be passed to each HTMLCutter in the
-                inner dictionary, generating an output dictionary with the
-                same keys as the cutter dictionary. the url scraped and the
-                result of `htmlcutter.cut` called on the received contents of
-                the matching url will be put in the output queue
-
-                in the case where a url found on the page matches more than
-                one pattern in `mining_rig.keys`, the most specific pattern,
-                determined by the length of the `urx` regular expression, will
-                be used. where two patterns have the same length, the one used
-                is arbitrary.
-            **kwargs:
+                the keys of this dictionary determine which new URLs will
+                be followed. keys mapping to `None` can be used to match URLs 
+                which should be followed, but whose content will be ignored
+                except for finding further URLs.
+            crawled:
+                set of URLs to be considered already visited. any URL contained
+                in it will not be scraped.
+            kwargs:
                 keyword arguments to pass to the `qio.Scraper` instance used
-                internall to fetch the web pages.
+                internally to fetch the web pages.
         '''
 
-        self.rig = {re.compile(k): v for k, v in mining_rig.items()}
-
         self.urls_q = Queue()
-        self.urls_q.put((seed_url, self.rig[self._get_cutter(seed_url)]))
+        self.urls_q.put(seed_url)
 
-        self.output_q = Queue()
+        self.callbacks = callbacks
 
         self._scr = Scraper(self.urls_q, self._crawl, output_q=self.output_q,
                             **kwargs)
 
-        self.crawled = set()
+        if crawled is None:
+            self.crawled = set()
+        else:
+            self.crawled = crawled
+
         self.crawled.add(seed_url)
         self._crl_lock = Lock()
 
-    def run(self):
-        self._scr.run()
+        patterns = sorted(self.rig.keys(), key=lambda x: -len(x.pattern))
+        self._main_re = re.compile('(' +
+                                   '|'.join([x.pattern for x in patterns]) +
+                                   ')')
 
-    def _get_cutter(self, url):
-        for urx in sorted(self.rig.keys(), key=lambda x: -len(x.pattern)):
-            if urx.match(url):
-                return urx
+    def run(self):
+        '''
+        initiates the scraper.
+
+        no requests are sent before this method is called
+        '''
+        self._scr.run()
 
     def _add_urls(self, urls, cutter_dict):
         with self._crl_lock:
             for url in urls:
                 if url not in self.crawled:
                     self.crawled.add(url)
-                    self.urls_q.put((url, cutter_dict))
+                    self.urls_q.put(url)
 
-    def _crawl(self, url_cutter_dict):
-        url, cutter_dict = url_cutter_dict
-
+    def _crawl(self, url):
         html = rqs.get(url).text
         for urx in sorted(self.rig.keys(), key=lambda x: -len(x.pattern)):
             self._add_urls(urx.findall(html), self.rig[urx])
-
+        
+        cutter_dict = self._get_cutter(url)
         if cutter_dict:
             out = {k: v.cut(html) for k, v in cutter_dict.items()}
             return (url, out)
