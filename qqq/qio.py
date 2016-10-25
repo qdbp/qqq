@@ -1,23 +1,13 @@
 import concurrent.futures as cfu
-import functools as fun
-import os.path as osp
-import pickle as pkl
+from functools import wraps
 from queue import Queue, Empty
 import time
 from threading import Lock, RLock, Event, Thread
-import traceback as trc
 import sched
 import sys
 
-import lxml
-
-
-def wr(*args):
-    '''
-    Convenience function to print something in the style of
-    `sys.stdout.write(something+'\r')
-    '''
-    print(*args, end='\r', flush=True)
+from .qlog import get_logger
+qio_log = get_logger('qio')
 
 
 class SplitQueue:
@@ -134,9 +124,9 @@ class Scraper:
     class implementing a basic multithreaded processing pipeline
     '''
     def __init__(self, input_q, work_func, output_q=None, collect_output=True,
-                 ignore_none=True, halt_on_empty=True,
+                 ignore_none=True, empty_callback=None,
                  workers=16, use_processes=False, halt=None,
-                 allow_fail=None, verbose=False):
+                 allow_fail=None):
         '''
         a number of workers are spawned, and for each `arg` in `args`,
         `work_func` is executed asynchronously on one of these workers.
@@ -177,10 +167,10 @@ class Scraper:
                 if `True`, `work_func` workers run in separate processes. else,
                 they run in separate threads. may not work with all types of
                 `work_func` if `True`.
-            halt_on_empty:
-                if `True`, the scraper will shut down when all arguments have
-                been exhausted. once shutdown is triggered, adding more
-                arguments to the input queue will not restart the scraper
+            empty_callback:
+                A callable. Will be called when `input_queue` is found empty.
+                After each call, it will not be called again until at least one
+                object has been retrieved from `input_queue`.
             collect_output:
                 if `True`, the return values of `work_func` will be made
                 available, in order of completion. should be set to False
@@ -202,8 +192,6 @@ class Scraper:
         # simplifies the processing loop
         allow_fail.append(cfu.CancelledError)
         self.allow_fail = allow_fail
-
-        self.verbose = verbose
 
         if use_processes:
             _work_exe = cfu.ProcessPoolExecutor
@@ -231,6 +219,18 @@ class Scraper:
         self.collect_output = collect_output
         self.ignore_none = ignore_none
 
+        self._callback_lock = Lock()
+
+        if empty_callback is not None:
+            def _ec(fut):
+                self.input_q.task_done()
+                if self._callback_lock.acquire(blocking=False):
+                    self.input_q.join()
+                    empty_callback()
+            self._ec = _ec
+        else:
+            self._ec = lambda f: None
+
         self._wx = _work_exe(max_workers=self.workers)
 
         if halt is None:
@@ -254,25 +254,28 @@ class Scraper:
 
     def halt(self):
         self._halt.set()
-        if self.verbose:
-            print('shutting down scraper')
+        qio_log.info('shutting down scraper')
         with self._wfut_lock:
             for f in self._wfut_s:
                 f.cancel()
         self._wx.shutdown(True)
+
+    def num_scheduled(self):
+        with self._wfut_lock:
+            return len(self._wfut_s)
 
     def _in_loop(self):
         while not self._halt.is_set():
             try:
                 arg = self.input_q.get_nowait()
                 wf = self._wx.submit(self.f, arg)
+                wf.add_done_callback(self._ec)
                 with self._wfut_lock:
                     self._wfut_s.add(wf)
             except Empty:
                 time.sleep(self._sleep_in)
             except Exception:
-                print('warning: unexpected exception in _in_loop',
-                      file=sys.stderr)
+                qio_log.warning('unexpected exception in _in_loop', exc_info=True)
         else:
             self.halt()
 
@@ -284,17 +287,16 @@ class Scraper:
             for wf in done:
                 try:
                     res = wf.result()
-                    if self.collect_output and not (self.ignore_none and res is None):
+                    if (self.collect_output and
+                            not (self.ignore_none and res is None)):
                         self.output_q.put(res)
                 except Exception as e:
                     if all([not isinstance(e, af) for af in self.allow_fail]):
-                        print('fatal: disallowed exception')
-                        trc.print_exc()
+                        qio_log.critical('disallowed exception', exc_info=True)
                         self.halt()
                         break
-                    elif self.verbose:
-                        print('allowed exception raised:')
-                        trc.print_exc()
+                    else:
+                        qio_log.debug('allowed exception raised', exc_info=True)
             time.sleep(self._sleep_out)
         else:
             self.halt()
@@ -302,57 +304,86 @@ class Scraper:
 
 class PoolThrottle:
     '''
-    Function call throttle, "X calls in Y seconds, sliding window" style.
+    Function call throttle, "X calls in Y seconds" style.
 
     Constrains call flow to adhere to a "max X requests in Y seconds" schema.
     Calls made in excess of this rate will block until there is room in the
-    pool.
+    pool. The pool is implemented as a sliding window.
 
     Functions to be throttled should be decorated directly by an instance of
     this class. Multiple functions decorated by the same instance will share
     the same pool.
+
+    Call order is preserved.
     '''
-    def __init__(self, X, Y, res=1e-1):
+    def __init__(self, pool_size, window, strict=False):
         '''
         Args:
-            X:
-                max requests allowed in Y seconds
-            Y:
-                span of time in which X requests are allowed
+            pool_size:
+                max requests allowed in a sliding window of `window` seconds
+            window:
+                sliding span of time in which `pool_size` requests are allowed
             res:
                 time resolution with which call attempts are made if the pool
                 is full
+            strict:
+                if `True`, the `window`-second timer after a call will start
+                only after it returns, else it will start right before the call
+                is made. A strict pool effectively makes X calls every (Y +
+                average_call_time) seconds.
         '''
-        self.X = X
-        self.Y = Y
-        self.res = res
+        self.pool_size = pool_size
+        self.window = window
+        self.strict = strict
 
         self._sched = sched.scheduler()
-        # current number of calls "in the pool"
+        # current number of calls "in flight"
+        # calls will block unless a synchronized read of _ifl returns < Y
+        # in which case _ifl will be incremented, and a decrement scheduled to
+        # occur in Y seconds
         self._ifl = 0
-        self._ifl_lock = RLock()
+        self._now_serving = 0
+        self._ifl_lock = Lock()
+
+        self._next_number = 0
+        self._next_number_lock = Lock()
 
     def _dec_ifl(self):
         with self._ifl_lock:
             self._ifl -= 1
 
+    def _take_a_number(self):
+        with self._next_number_lock:
+            n = self._next_number
+            self._next_number += 1
+            return n
+
     def __call__(self, f):
-        @fun.wraps(f)
-        def wrapped(*args, **kwargs):
+        @wraps(f)
+        def throttled(*args, **kwargs):
+            number = self._take_a_number()
             while True:
                 # check for decrements
-                self._sched.run()
+                wait = self._sched.run(blocking=False)
+                # don't do actual function call with the lock
+
                 with self._ifl_lock:
-                    do_call = self._ifl < self.X
+                    do_call = (self._ifl < self.pool_size and
+                               number == self._now_serving)
                     if do_call:
                         self._ifl += 1
+                        self._now_serving += 1
+                        if not self.strict:
+                            self._sched.enter(self.window, 1, self._dec_ifl)
                 if do_call:
-                    out = f(*args, **kwargs)
-                    self._sched.enter(self.Y, 1, self._dec_ifl)
-                    return out
+                    try:
+                        return f(*args, **kwargs)
+                    finally:
+                        if self.strict:
+                            self._sched.enter(self.window, 1, self._dec_ifl)
                 else:
-                    time.sleep(self.res)
-        return wrapped
+                    time.sleep(1e-2 if wait is None else wait)
+        return throttled
 
 
 class FunctionPrinter:

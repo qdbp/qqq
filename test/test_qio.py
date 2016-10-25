@@ -8,10 +8,10 @@ import numpy.random as npr
 import pytest
 
 from qqq.qio import Scraper, SplitQueue
-from qqq.qio import FunctionPrinter
+from qqq.qio import PoolThrottle
 
 
-def test_collatz():
+def no_test_collatz():
     outputs = []
 
     def collatz_mul(arg):
@@ -51,51 +51,42 @@ def test_collatz():
     s3 = Scraper(done, collatz_done, collect_output=False, halt_on_empty=False,
                  verbose=True, halt=halt).run()
 
-    time.sleep(10)
     halt.set()
 
     assert len(outputs) == 24
 
-# def test_functionprinter():
-#     fp = FunctionPrinter()
-# 
-#     @fp.decorate
-#     def func():
-#         sys.stdout.write('printing func!\n')
-# 
-#     @fp.decorate
-#     def gunc():
-#         sys.stdout.write('printing gunc 1!\n')
-#         func()
-#         sys.stdout.write('printing gunc 2 without newline...')
-#         sys.stdout.write('... still new stuff ...')
-#         sys.stdout.write('... and done!\n') 
-#         print('using print in gunc!')
-# 
-#     @fp.decorate
-#     def hunc():
-#         sys.stdout.write('printing hunc 1!\n')
-#         gunc()
-#         junc()
-#         func()
-#         raise ValueError()
-#         gunc()
-#         sys.stdout.write('printing hunc 2!\n')
-# 
-#     def junc():
-#         sys.stdout.write('unwrapped function junc!\n')
-# 
-#     def kunc():
-#         sys.stdout.write('unwrapped function kunc 1, will call hunc, junc!\n')
-#         try:
-#             hunc()
-#         except Exception as e:
-#             print('got exception {}'.format(e))
-#         junc()
-#         gunc()
-#         sys.stdout.write('unwrapped function kunc 2\n')
 
-    kunc()
+def test_poolthrottle():
+    pool = PoolThrottle(1, 0.1)
+    exe = cfu.ThreadPoolExecutor(max_workers=3)
+
+    out = []
+
+    @pool
+    def pooled_append(x):
+        out.append(x)
+
+    def fighter1():
+        for i in range(10):
+            pooled_append(i)
+
+    def fighter2():
+        for i in range(10):
+            pooled_append(i)
+
+    def fighter3():
+        for i in range(10):
+            pooled_append(i)
+
+    exe.submit(fighter1)
+    exe.submit(fighter2)
+    exe.submit(fighter3)
+    exe.shutdown(True)
+
+    print('\n\n\n\n')
+    print(out)
+
 
 if __name__ == '__main__':
-    pytest.main([__file__])
+    # pytest.main([__file__])
+    test_poolthrottle()
