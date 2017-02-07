@@ -1,97 +1,90 @@
+from threading import Lock
+
+import numpy as np
 import numpy.random as npr
 from numpy.lib.stride_tricks import as_strided
 
 
+def softmax(x):
+    return np.exp(x) / np.sum(np.exp(x), axis=0)
+
+
+def relu(x):
+    return np.minimum(x, 0)
+
+
 def decay(k, x, x0):
-    return k*x + (1-k)*x0
+    return k * x + (1 - k) * x0
 
 
-
-def sl_window(a, w, s, axis=0, sl_axis=0):
-    """
+def sl_window(arr: np.ndarray, window: int, stride: int, axis=0, sl_axis=0):
+    '''
     Generates staggered windows of an array.
 
-    Given an array a of dimension N, stride size s, and window size w,
-    returns an array of dimension N + 1 of w-sized windows, each offset
-    by s from the previous. The "sliding" happens along the given axis.
+    Given an array a of dimension N, stride size `stride`, and window size
+    `window`, returns an array of dimension N + 1 of `window`-sized windows,
+    each offset by `stride` from the previous. The 'sliding' happens along
+    `axis` and the windows lie along `sl_axis` of the output array.
 
     Args:
-        a: array over which to generate windows
-        w: window size
-        s: stride size
-        axis: axis of a along which to slide the window
-        sl_axis: axis along which windows lie
+        arr: array over which to generate windows
+        window: window size
+        stride: stride size
+        axis: axis of `arr` along which to slide the window
+        sl_axis: axis of output array along which windows will lie
 
-    Return:
+    Returns:
         out: array of windows; shape nwindows on zeroth axis,
              w on axis corresponding to 'axis' argument, other
              dimensions unchanged
-    """
+    '''
 
-    nw = 1 + (a.shape[axis] - w)//s
+    num_windows = 1 + (arr.shape[axis] - window) // stride
+    win_stride = stride * arr.strides[axis]
 
-    nas = list(a.shape)
-    nas[axis] = w
-    ns = tuple(nas[:sl_axis] + [nw] + nas[sl_axis:])
+    new_shape = arr.shape[:axis] + (window,) + arr.shape[axis + 1:]
+    new_shape = new_shape[:sl_axis] + (num_windows,) + new_shape[sl_axis:]
 
-    nss = list(a.strides)
-    ss = tuple(nss[:sl_axis] + [s*a.strides[axis]] + nss[sl_axis:])
-    out = as_strided(a, ns, ss)
+    new_strides = arr.strides[:sl_axis] + (win_stride,) + arr.strides[sl_axis:]
 
-    return out
+    return as_strided(arr, new_shape, new_strides)
 
 
 def unsl_window(a):
-    """
+    '''
     Undoes the action of sl_window to the extent possible.
-    """
+    '''
 
     return a.base.base
 
 
-def ttsplit(arrs, f=0.2, align=0, shf_train=True, shf_test=False):
-    """ Does a test-train split for multiple arrays.
+def _tandem(mode, *args, rs=None):
+    if not args:
+        return ()
 
-        Given any number of arrays of the same length,
-        splits off from each a fraction given by f,
-        and returns the split parts the train and the test.
+    if len({len(a) for a in args}) > 1:
+        raise ValueError('arrays must be of the same length for tandem ops')
 
-        Args:
-            arrs: the arrays to split
-            f: the fraction to split off
-            shf_train: whether to shuffle the train arrays
-            shf_test: whether to shuffle the test arrays
+    args = [np.asarray(a) for a in args]
+    l = len(args[0])
 
-        Return:
-            L: the train arrays, length (1-f)*original
-            V: the test arrays, length f*original
-        """
-
-    assert len(set([len(arr) for arr in arrs])) == 1
-
-    l = len(arrs[0])
-    s = int(l*(1-f))
-
-    L, V = [], []
-
-    rs = npr.get_state()
-    for arr in arrs:
-        if shf_train and shf_test:
-            npr.shuffle(arr)
+    with Lock():
+        if rs:
             npr.set_state(rs)
-        L.append(arr[:s])
-        V.append(arr[s:])
 
-    if shf_train and not shf_test:
-        shuffle_arrs(L, rs)
-    if shf_test and not shf_train:
-        shuffle_arrs(V, rs)
+        if mode == 'shuffle':
+            ixes = npr.permutation(l)
+        elif mode == 'resample':
+            ixes = npr.choice(np.arange(l, dtype=np.int64),
+                              size=l, replace=True)
+        else:
+            raise ValueError('invalid mode in _tandem')
 
-    return L, V
+    return tuple(arr[ixes] for arr in args)
 
 
-def shuffle_arrs(arrs, rs=None):
-    """ Shuffles a collection of arrays in tandem.
+def tandem_shuffle(*args, rs=None):
+    ''' Shuffles a collection of arrays in tandem.
 
         Given a sequence of arrays, shuffles
         each to the same permutation, so that
@@ -99,43 +92,26 @@ def shuffle_arrs(arrs, rs=None):
         stay aligned after shuffling.
 
         Args:
-            arrs: collection of arrays to shuffle
-            rs: random state to shuffle by """
+            *args: array-likes of the same length
+            rs: random state to shuffle by. If None, uses the current.
+    '''
 
-    for arr in arrs:
-        npr.shuffle(arr)
-        if rs is not None:
-            npr.set_state(rs)
+    return _tandem('shuffle', *args, rs=rs)
 
-if __name__ == "__main__":
+
+def tandem_resample(*args, rs=None):
+    ''' Chooses the same random subset from a collection of arrays.
+
+        Given a sequence of arrays, resamples each with replacement.
+        Equivalent to `zip(*resample(zip(*args)))`
+
+        Args:
+            *args: array-likes of the same length
+            rs: random state to shuffle by. If None, uses the current.
+    '''
+
+    return _tandem('resample', *args, rs=rs)
+
+
+if __name__ == '__main__':
     import numpy as np
-
-    test_arr = np.asarray(range(128))
-    # test_arr = np.reshape(test_arr, (16, 2, 4, 4))
-
-    print('test array:')
-    print(test_arr.shape)
-    print(test_arr)
-
-    
-    print('slide w{} s{} axis{}'.format(4, 4, 0))
-    t1 = sl_window(test_arr, 4, 4, axis=0)
-    print(t1.shape)
-    print(t1)
-
-    print('slide w{} s{} axis{}'.format(3, 3, 1))
-    t2 = sl_window(test_arr, 3, 3, axis=1)
-    print(t2.shape)
-    print(t2)
-
-    print('slide w{} s{} axis{} sl_axis{}'.format(5, 3, 0, 1))
-    t3 = sl_window(test_arr, 5, 3, axis=0, sl_axis=1)
-    print(t1.shape)
-    print(t1)
-
-    print('unsl t1')
-    print(unsl_window(t1))
-    print('unsl t2')
-    print(unsl_window(t2))
-    print('unsl t2')
-    print(unsl_window(t3))

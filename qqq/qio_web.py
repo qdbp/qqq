@@ -91,7 +91,7 @@ class HTMLCutter:
                 in the current state, unless the XPath selects for a 
                 property, in which case state becomes a list of unicode
                 strings.
-                
+
                 care should be taken when passing absolute ("//") paths
                 because these are NOT implicitly made relative.
             HTMLCutter.STRIP:
@@ -189,6 +189,7 @@ class HTMLCutter:
 
 
 class WebScraper:
+
     def __init__(self, seed_url, callbacks, crawled=None, **kwargs):
         '''
         Notation:
@@ -206,7 +207,7 @@ class WebScraper:
                 retrieved successfully.
 
                 the keys of this dictionary determine which new URLs will
-                be followed. keys mapping to `None` can be used to match URLs 
+                be followed. keys mapping to `None` can be used to match URLs
                 which should be followed, but whose content will be ignored
                 except for finding further URLs.
             crawled:
@@ -257,7 +258,7 @@ class WebScraper:
         html = rqs.get(url).text
         for urx in sorted(self.rig.keys(), key=lambda x: -len(x.pattern)):
             self._add_urls(urx.findall(html), self.rig[urx])
-        
+
         cutter_dict = self._get_cutter(url)
         if cutter_dict:
             out = {k: v.cut(html) for k, v in cutter_dict.items()}

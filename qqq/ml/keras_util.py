@@ -1,244 +1,297 @@
-import glob
-import hashlib as hsh
-import json
+import argparse as arg
+import cmd
 import os
 import os.path as osp
 import sys
-import time
+from datetime import datetime as dtt
+from datetime import timedelta
+from glob import glob
+from threading import Thread
+from typing import Optional
 
-import keras.backend as K
-import keras.callbacks as kcb
-import keras.models as krm
-# import keras.utils.visualize_util as kuv
 import numpy as np
-import sklearn.metrics as skm
+import numpy.random as npr
 
-from qqq.np import decay as decay
+from keras import backend as K
+from keras.callbacks import Callback
+from keras.layers.noise import GaussianNoise
+from qqq.qlog import get_logger
+
+log = get_logger(__file__)
 
 HDF5_EXT = 'hdf5'
 JSON_EXT = 'json'
 PNG_EXT = 'png'
 
 
-def mk_identifier(m):
-    # sort_keys is very important
-    reset = False
-    try:
-        lr = K.get_value(m.optimizer.lr)
-        m.optimizer.lr.set_value(0)
-        reset = True
-    except AttributeError:
-        pass
-    j = m.to_json(sort_keys=True)
-    h = hsh.sha512(j.encode('utf-8')).hexdigest()[:8].upper()
-    if reset:
-        K.set_value(m.optimizer.lr, lr)
-    return j, h
+def stack_layers(inp, *layers):
+    for l in layers:
+        inp = l(inp)
+
+    return inp
 
 
-# class ModelHandler:
-# 
-#     def __init__(self, model_path, mname):
-#         self.MODEL_ROOT = model_path
-#         self.mname = mname
-# 
-#     def get_model_path(self, m):
-#         _, h = mk_identifier(m)
-#         p = osp.join(self.MODEL_ROOT, h)
-#         os.makedirs(p, exist_ok=True)
-#         return p
-# 
-#     def get_in_model_path(self, m, fn):
-#         return osp.join(self.get_model_path(m), fn)
-# 
-#     def mk_model_name(self, m, prefix='', get_jh=False,
-#                       ext=JSON_EXT):
-#         j, h = mk_identifier(m)
-#         fn = prefix + '_' + self.mname + '.{}'.format(ext)
-#         fn = osp.join(self.get_model_path(m), fn)
-#         if get_jh:
-#             return fn, j, h
-#         else:
-#             return fn
-# 
-#     def save_model(self, m):
-#         fn, j, _ = self.mk_model_name(m, get_jh=True)
-#         with open(fn, 'w') as f:
-#             f.write(j)
-# 
-#     def load_model(self, m):
-#         fn = self.mk_model_name(m)
-#         m.from_json(fn)
-# 
-#     def save_weights(self, m, prefix='', **kwargs):
-#         fn = self.mk_model_name(m, ext=HDF5_EXT)
-#         m.save_weights(fn, **kwargs)
-# 
-#     def load_weights(self, m, in_name='best'):
-#         # TODO: slash is intentional, find better way of setting mn
-#         match = glob.glob(self.get_model_path(m) + '/' + 
-#                           '*{}*'.format(in_name) + HDF5_EXT)
-#         if len(match) > 1:
-#             print('found more than one matching model:\n{}\nloading first'
-#                   .format('\n\t'.join(match)))
-#         m.load_weights(match[0])
-# 
-#     def load_model_json(self, hsh, prefix, reset_lr=1e-3):
-#         fn = osp.join(self.MODEL_ROOT, hsh, prefix _'.'+JSON_EXT)
-#         with open(fn, 'r') as f:
-#             m = krm.model_from_json(f.read())
-#         if reset_lr:
-#             K.set_value(m.optimizer.lr, reset_lr)
-#         return m
+def shuffle_weights(weights):
+    return [npr.permutation(w.flat).reshape(w.shape) for w in weights]
 
 
-class PIDLearner:
-    def __init__(self, base_lr, patience=1e4,
-                 p=0.6, i=0.2, d=0.1, k=1/5, scale=1e-3):
+class ModelHandler:
+    '''
+    Adjutant object to a keras model for weight handling and loading.
+    '''
 
-        self.pat = patience
-        self.b_lr = base_lr
-        self.p = p
-        self.i = i
-        self.d = d
-        self.k = k
+    @classmethod
+    def attach(cls, model, name, **kwargs):
+        '''
+        Attaches handler to the model `model`.
+        '''
+        if not hasattr(model, 'handler'):
+            model.handler = cls(model, name, **kwargs)
+        return model, model.handler
 
-        self._c_lr = 1
-        self._std = 1
-        self._mu = 0
-        self._p_val = 0
-        self._i_val = 0
-        self._d_val = 0
+    def __init__(self, model, name, min_lr_factor=1e-3, max_sigma=1,
+                 weights_dir='./weights/'):
+        '''
+        Args:
+            name: name to use for the model and associated files
+            min_lr_factor: learning rate will never be adjusted lower than
+                the current learning rate times this factor
+            weights_dir: directory to store weights files
+        '''
+        self.model = model
+        self.init_weights = model.get_weights()
+        self.init_lr = self.get_lr()
+        self.name = name
+        self.root = os.environ.get('QQQ_WEIGHTSIDR', weights_dir)
 
-    def step(self, v_loss):
-        if self._mu is None:
-            self._mu = v_loss
+        self.bag = None
+        self.fold = None
 
-        self._std = decay(self.k, v_loss - self.mu, self._std)
+        self.max_lr = self.get_lr()
+        # XXX: hacky
+        self.min_lr = self.max_lr * min_lr_factor
 
-        # time for magic fudge; should learn this
-        self._i_val += v_loss - self._mu
-        self._p_val = v_loss - self._mu
+        self.max_sigma = max_sigma
+        self.noise_layers = [l for l in model.layers
+                             if isinstance(l, GaussianNoise)]
 
-        self._mu = decay(self.k, v_loss, self._mu)
-        # the "maybe, sort of derivative"(tm) from Naumov MathWorks(R)
-        self._d_val = (v_loss - self._mu)/self._mu
+        self.init_sigma = [n.sigma for n in self.noise_layers]
 
-        lr_adj = -(self._i_val * self.i +
-                   self._p_val * self.p +
-                   self._d_val * self.d)
-        kill = self._i_val > self.patience
-        return lr_adj, self._i_val, kill
+        self._w_re = r'weights_{}_([0-9\.]+)\.hdf5'
+
+    def reinit_model(self):
+        self.model.set_weights(shuffle_weights(self.init_weights))
+        self.set_lr(self.init_lr)
+        for ix, s in enumerate(self.init_sigma):
+            self.set_noise(s, ix)
+        log.info('reinitialized model')
+
+    # TODO
+    def iter_weights(self, *, do_folds=True):
+        '''
+        Returnes an iterator over the model's component weight files.
+
+        Used to load a set of related (bagged and/or folded) weights
+        in sequence for aggregate predictions.
+        '''
+        raise NotImplementedError
+
+    @property
+    def weights_dir(self) -> str:
+        path = [self.root, self.name,
+                'no_bag/' if self.bag is None else f'bag_{self.bag}',
+                'no_fold/' if self.fold is None else f'fold_{self.fold}']
+
+        out_path = osp.join(*path)
+        os.makedirs(out_path, exist_ok=True)
+
+        return out_path
+
+    @property
+    def _w_temp(self):
+        return osp.join(self.weights_dir + 'weights_{}_{:.4f}.hdf5')
+
+    @property
+    def _w_glob(self):
+        return osp.join(self.weights_dir + 'weights_{}_*.hdf5')
+
+    def set_bag(self, bag: Optional[int]) -> None:
+        self.bag = bag
+
+    def set_fold(self, fold: Optional[int]) -> None:
+        self.fold = fold
+
+    def set_name(self, name: str) -> None:
+        self.name = name
+
+    def save_weights(self, typ: str, param: float) -> None:
+        old_fns = sorted(glob(self._w_glob.format(typ)))
+        for old_fn in old_fns:
+            os.remove(old_fn)
+        new_fn = self._w_temp.format(typ, param)
+        self.model.save_weights(new_fn)
+        log.debug(f'saved new weights to {new_fn}')
+
+    def load_weights(self, typ):
+        fns = sorted(glob(self._w_glob.format(typ)))
+        if fns:
+            fn = fns[0]
+            log.info(f'loaded weights from {fn}')  # type: ignore
+            self.model.load_weights(fn)
+
+    def get_lr(self):
+        return K.get_value(self.model.optimizer.lr)
+
+    def set_lr(self, lr):
+        lr = np.asarray(lr).astype(np.float32)
+        K.set_value(self.model.optimizer.lr, lr)
+        log.debug(f'set learning rate to {lr!s}')
+
+    def adj_lr(self, dlr):
+        '''
+        Adjusts the learning given the training and validation losses.
+
+        A learning rate controller (`lr_ctl`) must be set beforehand using
+        `attach_lr_ctl`.
+
+        Args:
+            dlr: learning rate adjustment, in units of current learning rate
+        '''
+
+        if dlr is not None:
+            lr = self.get_lr()
+            true_dlr = dlr * lr
+            self.set_lr(np.maximum(lr + true_dlr, self.min_lr))
+
+    def adj_noise(self, dsigma, ix):
+        s = self.get_noise(ix)
+        new_sigma = np.minimum(np.maximum(s + s * dsigma, 0), self.max_sigma)
+        self.set_noise(new_sigma, ix)
+
+    def set_noise(self, new_sigma, ix):
+        self.noise_layers[ix].sigma = new_sigma
+
+    def get_noise(self, ix):
+        return self.noise_layers[ix].sigma
+
+    def __getattr__(self, name):
+        return getattr(self.model, name)
 
 
-class TrainingMonitor(kcb.Callback):
-    """
-    The systemd of keras callbacks. A monolithic and
-    well-integrated monster which handles, among other
-    things, data validation, learning rater adjustment,
-    and saving weights.
+class TrainerUI:
 
-    Planned features include and input data stream control.
-    """
-    def __init__(self, stagmax=2, mname='unnamed_model',
-                 aeons=3, aeon_lr_factor=1/3,
-                 aeon_stag_factor=2, init_lr=1e-3):
-        self.mname = mname
+    class TrainCMD(cmd.Cmd):
+        intro = '~~~ QQQ Trainer UI ~~~'
+        prompt = ':: '
 
-        self.aeons = aeons
-        self.aeon_lr_factor = aeon_lr_factor
-        self.aeon_stag_factor = aeon_stag_factor
-        self.stagmax = stagmax
-        self.stagcnt = 0
+        def do_train(self):
+            pass
 
-        self.init_lr = init_lr
+        def set_lr(self):
+            pass
 
-        self.best_loss = np.inf
-        self.current_best_weights = None
+    def __init__(self):
+        self.model = None
+        self.h = None
 
-        self.aeon = 0
-        self.epoch = 0
-        self.batch = 0
+        self._setup_parser()
+        self._run()
 
-        self.cur_loss = None
-        self.k = 0.1
+    def _setup_parser(self):
+        self._parser = arg.ArgumentParser('TrainerUI')
 
-        self.start_mark = 0
-        self.epoch_mark = 0
+    def add_model(self, model, name):
+        self.model, self.h = ModelHandler.attach(model, name)
 
-        self.begin_str =\
-            """{}\nTRAINING MODEL {} FOR {} AEONS"""\
 
-        self.train_str = 'A{:02d} E{:03d} B{:04d}×{} L{:0.3f} '
-        self.val_str = ('| VL{:0.3f} [stagcnt {}/{}] '
-                        '[{:6.0f} epoch secs, {:6.0f} total]')
+class HandlerCallback(Callback):
 
-        super().__init__()
+    def set_model(self, model):
+        if not hasattr(model, 'handler'):
+            raise ValueError(
+                'This callback requires a model with a ModelHandler'
+            )
+        super().set_model(model)
+
+
+class WeightSaver(HandlerCallback):
+
+    def __init__(self, *args, min_improvement=0.95, load=True, **kwargs):
+        self.min_improvement = 0.95
+        self.load = load
+        super().__init__(*args, **kwargs)
 
     def on_train_begin(self, logs=None):
-        K.set_value(self.model.optimizer.lr, self.init_lr)
-        self.start_mark = time.time()
-        print(self.begin_str
-              .format('='*80, self.mname, self.aeons)
-              )
+        self.best_loss = np.inf
+        if self.load:
+            self.model.handler.load_weights('best')
 
-    def on_batch_begin(self, batch, logs=None):
-        self.batch = batch
+    def on_epoch_end(self, epoch, logs):
+        vl = logs['val_loss']
+        if vl < self.best_loss * self.min_improvement:
+            self.model.handler.save_weights('best', vl)
 
-    def on_batch_end(self, batch, logs=None):
-        l = float(logs['loss'])
-        if self.cur_loss is None:
-            self.cur_loss = l
+
+class NoiseControl(HandlerCallback):
+    '''
+    Adjusts the noise in a layer.
+
+    Determines the change based on the difference between the training
+    and validation loss.
+    '''
+
+    def __init__(self, index, k=0.2):
+        self.index = index
+        self.k = k
+
+    def on_epoch_end(self, epoch, logs):
+        tl, vl = logs['loss'], logs['val_loss']
+        sigma = self.k * 2 * (vl - tl) / (vl + tl)
+        self.model.handler.adj_noise(sigma, self.index)
+
+        new_sigma = self.model.handler.get_noise(self.index)
+        s = f'noise level on index {self.index} now at {new_sigma:.2f}'
+        if (epoch % 9):
+            log.verbose(s)
         else:
-            self.cur_loss = self.k * l + (1 - self.k) * self.cur_loss
-        sys.stdout.write('\r' + self.train_str.format(self.aeon,
-                                                      self.epoch,
-                                                      self.batch+1,
-                                                      logs['size'],
-                                                      self.cur_loss))
+            log.info(s)
+
+
+class ProgLogger(HandlerCallback):
+
+    def on_train_begin(self, logs=None):
+        h = self.model.handler
+        name, bag, fold = h.name, h.bag, h.fold
+        log.info(
+            f'beginning training for model "{name}", bag {bag}, fold {fold}')
+
+        self._ulr = float(self.model.handler.get_lr()) * 1e6
+        self._tst = dtt.now()
 
     def on_epoch_begin(self, epoch, logs=None):
-        self.epoch_mark = time.time()
-        self.epoch += 1
+        self._est = dtt.now()
+        # check for lr changes
+        _cur_ulr = float(self.model.handler.get_lr()) * 1e6
+        if not np.isclose(self._ulr, _cur_ulr):
+            log.info(f'learning rate changed from {self._ulr:3.0} x 10^-6 to '
+                     f'{_cur_ulr:3.0} x 10^-6')
+        self._ulr = _cur_ulr
 
     def on_epoch_end(self, epoch, logs=None):
-        loss = logs['val_loss']
+        if logs is None:
+            logs = {}
+        tl, vl = logs['loss'], logs.get('val_loss', '-----')
+        now = dtt.now()
+        tim = timedelta(seconds=int((now - self._est).total_seconds()))
+        ttim = timedelta(seconds=int((now - self._tst).total_seconds()))
 
-        if loss >= self.best_loss:
-            self.stagcnt += 1
+        s = (f'E{epoch:04d} finished in {tim} ({ttim} total)'
+             f' | TL {tl:5.3} VL {vl:5.3}')
+
+        if epoch % 5:
+            log.verbose(s)
         else:
-            self.stagcnt = max(self.stagcnt-1, 0)
-            self.best_loss = loss
-            self.model.save_weights(self.mname +
-                                    'a{}_best_val.hdf5'.format(self.aeon),
-                                    overwrite=True)
-            self.current_best_weights = self.model.get_weights()
+            log.info(s)
 
-        now = time.time()
-        sys.stdout.write(self.val_str.format(loss,
-                                             self.stagcnt, self.stagmax,
-                                             now - self.epoch_mark,
-                                             now - self.start_mark)+'\n')
-        sys.stdout.flush()
-
-        if self.stagcnt >= self.stagmax:
-            sys.stdout.write('AEON {} COMPLETE'.format(self.aeon))
-            if self.aeon >= self.aeons - 1:
-                self.save_best_weights()
-                print(': TRAINING FINISHED')
-                self.model.stop_training = True
-            else:
-                self.aeon += 1
-                self.epoch = 0
-                self.stagcnt = 0
-                self.stagmax *= self.aeon_stag_factor
-                lr = (K.get_value(self.model.optimizer.lr) *
-                      self.aeon_lr_factor)
-                print(': LEARNING RATE SET TO {:.3E}, NEW STAGMAX {}\n'
-                      .format(float(lr), self.stagmax))
-                K.set_value(self.model.optimizer.lr, lr)
-
-    def save_best_weights(self):
-        self.model.set_weights(self.current_best_weights)
-        self.model.save_weights(self.mname+'_best_final.hdf5',
-                                overwrite=True)
+    def on_train_end(self, epoch, logs=None):
+        log.info(f'Training finished in {dtt.now() - self._tst}')

@@ -1,19 +1,32 @@
 import concurrent.futures as cfu
-from functools import wraps
-from queue import Queue, Empty
-import time
-from threading import Lock, RLock, Event, Thread
 import sched
 import sys
+import time
+from functools import wraps
+from queue import Empty, Queue
+from threading import Event, Lock, RLock, Thread
 
 from .qlog import get_logger
+
 qio_log = get_logger('qio')
+
+
+class AutoCache:
+
+    def __init__(self, *, fn=None, mode='dbfile'):
+        if mode == 'dbfile':
+            if fn is None:
+                raise ValueError('need to supply "fn" argument if mode is'
+                                 'dbfile')
+            else:
+                self.dbfile = fn
 
 
 class SplitQueue:
     '''
     class splitting multiplt `queue.Queue` objects into several
     '''
+
     def __init__(self, input_q, n_branches, cond_func,
                  halt=None, _debug=False):
         '''
@@ -82,6 +95,7 @@ class MergeQueue:
     relative order of objects within any input queue is preserved in the output
     queue
     '''
+
     def __init__(self, input_qs, halt=None):
         '''
         Arguments:
@@ -101,7 +115,7 @@ class MergeQueue:
         else:
             assert isinstance(halt, Event)
             self._halt = halt
-            
+
         self._poll_lag = 0.05
 
         Thread(target=self._loop, daemon=True).start()
@@ -123,6 +137,7 @@ class Scraper:
     '''
     class implementing a basic multithreaded processing pipeline
     '''
+
     def __init__(self, input_q, work_func, output_q=None, collect_output=True,
                  ignore_none=True, empty_callback=None,
                  workers=16, use_processes=False, halt=None,
@@ -275,7 +290,8 @@ class Scraper:
             except Empty:
                 time.sleep(self._sleep_in)
             except Exception:
-                qio_log.warning('unexpected exception in _in_loop', exc_info=True)
+                qio_log.warning(
+                    'unexpected exception in _in_loop', exc_info=True)
         else:
             self.halt()
 
@@ -296,7 +312,8 @@ class Scraper:
                         self.halt()
                         break
                     else:
-                        qio_log.debug('allowed exception raised', exc_info=True)
+                        qio_log.debug(
+                            'allowed exception raised', exc_info=True)
             time.sleep(self._sleep_out)
         else:
             self.halt()
@@ -316,6 +333,7 @@ class PoolThrottle:
 
     Call order is preserved.
     '''
+
     def __init__(self, pool_size, window, strict=False):
         '''
         Args:
@@ -387,6 +405,7 @@ class PoolThrottle:
 
 
 class FunctionPrinter:
+
     def __init__(self, tab_depth=4):
         self.depth = 0
         self.tab_depth = 4
@@ -396,7 +415,7 @@ class FunctionPrinter:
         self.fresh_line = True
 
     def decorate(self, f):
-        @fun.wraps(f)
+        @wraps(f)
         def wrapped(*args, **kwargs):
             self.depth += 1
             sys.stdout = self
@@ -411,10 +430,11 @@ class FunctionPrinter:
 
     def write(self, s):
         if self.fresh_line:
-            sys.__stdout__.write('{}{}: {}'.format(' '*(self.depth-1)*self.tab_depth,
+            sys.__stdout__.write('{}{}: {}'.format(' ' * (self.depth - 1) *
+                                                   self.tab_depth,
                                                    self.fn_cache[self.depth],
                                                    s)
-                                )
+                                 )
         else:
             sys.__stdout__.write(s)
 
