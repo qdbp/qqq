@@ -14,7 +14,11 @@ import numpy.random as npr
 
 from keras import backend as K
 from keras.callbacks import Callback
+from keras.engine.topology import Layer
 from keras.layers.noise import GaussianNoise
+
+import theano
+
 from qqq.qlog import get_logger
 
 log = get_logger(__file__)
@@ -24,11 +28,17 @@ JSON_EXT = 'json'
 PNG_EXT = 'png'
 
 
-def stack_layers(inp, *layers):
-    for l in layers:
-        inp = l(inp)
+def apply_layers(inp, *stacks):
 
-    return inp
+    if isinstance(stacks[0], Layer):
+        stacks = [stacks]
+
+    y = inp
+    for stack in stacks:
+        for layer in stack:
+            y = layer(y)
+
+    return y
 
 
 def shuffle_weights(weights):
@@ -41,15 +51,15 @@ class ModelHandler:
     '''
 
     @classmethod
-    def attach(cls, model, name, **kwargs):
+    def attach(cls, model, *, name, **kwargs):
         '''
         Attaches handler to the model `model`.
         '''
         if not hasattr(model, 'handler'):
-            model.handler = cls(model, name, **kwargs)
+            model.handler = cls(model, name=name, **kwargs)
         return model, model.handler
 
-    def __init__(self, model, name, min_lr_factor=1e-3, max_sigma=1,
+    def __init__(self, model, *, name, min_lr_factor=1e-3, max_sigma=1,
                  weights_dir='./weights/'):
         '''
         Args:
@@ -216,9 +226,12 @@ class HandlerCallback(Callback):
 
 class WeightSaver(HandlerCallback):
 
-    def __init__(self, *args, min_improvement=0.95, load=True, **kwargs):
+    def __init__(self, *args,
+                 min_improvement=0.95, load=True,
+                 compare_key='val_loss', **kwargs):
         self.min_improvement = 0.95
         self.load = load
+        self.compare_key = compare_key
         super().__init__(*args, **kwargs)
 
     def on_train_begin(self, logs=None):
@@ -227,11 +240,12 @@ class WeightSaver(HandlerCallback):
             self.model.handler.load_weights('best')
 
     def on_epoch_end(self, epoch, logs):
-        vl = logs['val_loss']
+        vl = logs[self.compare_key]
         if vl < self.best_loss * self.min_improvement:
             self.model.handler.save_weights('best', vl)
 
 
+# FIXME: this doesn't actually set the noise in the graph
 class NoiseControl(HandlerCallback):
     '''
     Adjusts the noise in a layer.
@@ -259,6 +273,16 @@ class NoiseControl(HandlerCallback):
 
 class ProgLogger(HandlerCallback):
 
+    def __init__(self, train_loss=None, val_loss=None):
+        '''
+        Args:
+            train_loss: name of training loss to watch for. Defaults to `loss`.
+            val_loss: name of validation loss to report.  Defaults to
+                `val_loss`.
+        '''
+        self.train_loss = train_loss or 'loss'
+        self.val_loss = val_loss or 'val_loss'
+
     def on_train_begin(self, logs=None):
         h = self.model.handler
         name, bag, fold = h.name, h.bag, h.fold
@@ -280,7 +304,7 @@ class ProgLogger(HandlerCallback):
     def on_epoch_end(self, epoch, logs=None):
         if logs is None:
             logs = {}
-        tl, vl = logs['loss'], logs.get('val_loss', '-----')
+        tl, vl = logs[self.train_loss], logs.get(self.val_loss, '-----')
         now = dtt.now()
         tim = timedelta(seconds=int((now - self._est).total_seconds()))
         ttim = timedelta(seconds=int((now - self._tst).total_seconds()))
