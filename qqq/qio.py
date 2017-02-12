@@ -1,322 +1,289 @@
-import concurrent.futures as cfu
+from abc import abstractmethod
+from random import randrange
 import sched
-import sys
 import time
+from inspect import isgeneratorfunction as isgenerator
 from functools import wraps
 from queue import Empty, Queue
-from threading import Event, Lock, RLock, Thread
+from threading import Event, Lock, Thread
 
 from .qlog import get_logger
 
-qio_log = get_logger('qio')
+log = get_logger(__file__)
 
 
-class AutoCache:
-
-    def __init__(self, *, fn=None, mode='dbfile'):
-        if mode == 'dbfile':
-            if fn is None:
-                raise ValueError('need to supply "fn" argument if mode is'
-                                 'dbfile')
-            else:
-                self.dbfile = fn
+def ensure_type(obj, t, *args, **kwargs):
+    if obj is None:
+        return t(*args, **kwargs)
+    elif not isinstance(obj, t):
+        raise ValueError(f'need a {t.__name__} object, got {obj}')
+    else:
+        return obj
 
 
-class SplitQueue:
+def iterable_to_q(iterable):
+    q = Queue()
+    for item in iterable:
+        q.put(item)
+    return q
+
+
+class HaltMixin:
     '''
-    class splitting multiplt `queue.Queue` objects into several
+    Adds a _halt handle.
     '''
 
-    def __init__(self, input_q, n_branches, cond_func,
-                 halt=None, _debug=False):
+    def __init__(self, *, halt=None, **kwargs):
+        '''
+        Args:
+            halt (None | threading.Event):
+                When set, the loop will shut down.  If `None`, a new internal
+                `Event` will be instantiated.
+        '''
+
+        self._halt = ensure_type(halt, Event)
+
+        super().__init__(**kwargs)
+
+    def halt(self):
+        '''
+        Halts the processor.
+        '''
+        self._halt.set()
+
+
+class ControlThreadMixin:
+    '''
+    Adds a run method and control thread.
+
+    Requires _run_target method.
+    '''
+
+    def __init__(self, **kwargs):
+
+        self._control_thread = Thread(target=self._control_loop, daemon=True)
+
+        super().__init__(**kwargs)
+
+    def run(self):
+        '''
+        Starts the control thread.
+        '''
+        self._control_thread.start()
+
+    @abstractmethod
+    def _control_loop(self):
+        '''
+        Function to be exectued in control thread.
+        '''
+
+
+class ManyToManyQueueMux(HaltMixin, ControlThreadMixin):
+    '''
+    Moves output from mulitple queues to multiple queues by given function.
+    '''
+
+    def __init__(self, *, input_qs, output_qs, cond_func,
+                 greedy=True, timeout=0.02, **kwargs):
         '''
         Arguments:
-            n_branches:
-                number of output queues to split into. these queues are stored
-                in a dict `output_qs` with integer keys in [0, `n_branches`)
-            cont_func:
-                function taking an object found in the input queue `input_q`
-                and returning an integer [0, `n_branches`). this integer gives
-                the key of output queue into which the object should be sorted.
-            halt:
-                a `threading.Event` object. when set, the loop will shut down.
-                if `None`, a new internal `Event` will be instantiated. the
-                splitqueue can still be shut down using the `halt` method.
-
-                warning: if using a shared event object `e`, this will
-                propagate the halt signal to all other object using `e`
+            input_qs (Queue | Iterable[Queue] | Dict[IKey, Queue]):
+                An input queue or collection of input Queues.  If an iterable,
+                the keys will be integer indices.  If single queue will be
+                treated like a singleton iterable.
+            output_qs (Queue | Iterable[Queue] | Dict[OKey, Queue]):
+                An output queue or collection of output Queues.  If an
+                iterable, the keys will be integer indices.  If single queue
+                will be treated like a singleton iterable.
+            cond_func (Callable[Tuple[IKey, Value], Tuple[OKey, Value]]):
+                A function which takes an input key and a value from the queue
+                and produces an output key and a list of new value. Should not
+                be an expensive computation, as it will be run in the single
+                work thread.
+            greedy (bool):
+                If `True`, will use a greedy strategy, emptying each input
+                queue fully before moving on to the next. Otherwise will
+                alternate strictly between input Queues, up to timeout.
+            timeout (float):
+                If no objects are received on an input queue in `timeout`, will
+                move on to the next.
         '''
-        self.input_q = input_q
-        self.n_branches = n_branches
+        super().__init__(**kwargs)
+
+        self.input_qs, self.input_q_map = self.__rectify_q_arg(input_qs)
+        self.output_qs, self.output_q_map = self.__rectify_q_arg(output_qs)
+
         self.cond_func = cond_func
 
-        self.output_qs = {i: Queue() for i in range(n_branches)}
+        self.greedy = greedy
+        self.timeout = timeout
 
-        if halt is None:
-            self._halt = Event()
-        else:
-            assert isinstance(halt, Event)
-            self._halt = halt
+    def __rectify_q_arg(self, q_arg):
+        if isinstance(q_arg, dict):
+            out = list(q_arg.values())
+            out_map = q_arg
+        elif isinstance(q_arg, Queue):
+            out = [q_arg]
+            out_map = {0: q_arg}
+        elif isinstance(q_arg, (list, tuple)):
+            out = q_arg
+            out_map = {ix: q for ix, q in enumerate(q_arg)}
 
-        self._debug = _debug
+        return out, out_map
 
-        Thread(target=self._loop, daemon=True, name='split_loop').start()
-
-    def halt(self):
-        '''
-        shut down the split queue
-        '''
-        self._halt.set()
-
-    def _loop(self):
+    def _control_loop(self):
         while not self._halt.is_set():
-            try:
-                obj = self.input_q.get(timeout=0.2)
-                k = self.cond_func(obj)
-                self.output_qs[k].put(obj)
-            except Empty:
-                print('empty', self._halt.is_set())
-                continue
-
-    def __getitem__(self, key):
-        '''
-        to support eas(ier) named assignment, e.g.:
-
-        >>> first, second = SplitQueue(in, 2, cond)[:]
-        '''
-        t = tuple(self.output_qs[i] for i in range(self.n_branches))
-        return t.__getitem__(key)
-
-
-class MergeQueue:
-    '''
-    class merging multiple `queue.Queue` objects into one
-
-    relative order of objects within any input queue is preserved in the output
-    queue
-    '''
-
-    def __init__(self, input_qs, halt=None):
-        '''
-        Arguments:
-            input_qs:
-                `queue.Queue` objects which to aggregate
-            halt:
-                a `threading.Event` object. when set, the loop will shut down.
-                if `None`, a new internal `Event` will be instantiated. the
-                splitqueue can still be shut down using the `halt` method.
-        '''
-        assert all([isinstance(iq, Queue) for iq in input_qs])
-        self.input_qs = input_qs
-        self.output_q = Queue()
-
-        if halt is None:
-            self._halt = Event()
-        else:
-            assert isinstance(halt, Event)
-            self._halt = halt
-
-        self._poll_lag = 0.05
-
-        Thread(target=self._loop, daemon=True).start()
-
-    def halt(self):
-        self._halt.set()
-
-    def _loop(self):
-        while not self._halt.is_set():
-            for iq in self.input_qs:
+            for key, in_q in self.input_q_map.items():
                 while True:
                     try:
-                        self.output_q.put(iq.get(timeout=self._poll_lag))
+                        obj = in_q.get(timeout=self.timeout)
+                        k, out = self.cond_func(key, obj)
+                        self.output_q_map[k].put(out)
                     except Empty:
                         break
 
+                    if not self.greedy:
+                        break
 
-class Scraper:
+
+class QueueExpander(ManyToManyQueueMux):
     '''
-    class implementing a basic multithreaded processing pipeline
+    Splits a queue evenly.
     '''
 
-    def __init__(self, input_q, work_func, output_q=None, collect_output=True,
-                 ignore_none=True, empty_callback=None,
-                 workers=16, use_processes=False, halt=None,
-                 allow_fail=None):
+    def __init__(self, *, input_q, n_outputs, balance, **kwargs):
+
+        output_qs = [Queue() for x in range(n_outputs)]
+
+        def expander(key, obj):
+            if balance:
+                ix = None
+                m = float('inf')
+                for qx, q in enumerate(output_qs):
+                    test_m = q.qsize()
+                    if test_m < m:
+                        ix = qx
+                        m = test_m
+                return ix, obj
+            else:
+                return randrange(n_outputs), obj
+
+        super().__init__(input_qs=[input_q],
+                         output_qs=output_qs,
+                         cond_func=expander,
+                         **kwargs)
+
+
+class QueueCondenser(ManyToManyQueueMux):
+    '''
+    Condenses many queues to one.
+    '''
+
+    def __init__(self, *, input_qs, output_q=None, **kwargs):
+
+        output_q = ensure_type(output_q, Queue)
+
+        def condenser(key, obj):
+            return 0, obj
+
+        super().__init__(input_qs=input_qs,
+                         output_qs=[output_q],
+                         cond_func=condenser,
+                         **kwargs)
+
+
+class WorkPipe(HaltMixin, ControlThreadMixin):
+    '''
+    Turns a function into a work pipe between two queues.
+
+    Detects and drains generators automatically.
+    '''
+
+    def __init__(self, *, input_q, work_func, output_q=None,
+                 unpack=False, discard=False, limit=0, **kwargs):
         '''
-        a number of workers are spawned, and for each `arg` in `args`,
-        `work_func` is executed asynchronously on one of these workers.
-
-        the control loops are run in a separate thread, and all workers are
-        daemonic. this means that invocation of `run` return does not block,
-        and work will be aborted if the main threads returns.
-
-        no verification of what work has actually completed is implemented.
-        this might be changed in the future if compelling cases where such
-        logic cannot be feasibly implemented in work_func itself (for instance
-        where there is some nontrivial cost to invoking work_func on a given
-        argument more than once, even across different program invocations).
-
         Arguments:
-            input_q:
-                a `queue.Queue` instance, or an iterable. if iterable, all of
-                its elemented will be added to a new `queue.Queue` instance
-                accessible as `scraper.input_q`.
-                this is the way the scraper instance receives work to do.
-                `input_q` will be polled, and its contents gotten and fed into
-                `worker_func`
-            work_func:
-                function to be called once for each argument passed to the
-                object through `add_arg` or `add_args`.
-            workers:
-                maximum number of instances of `work_func` to be run together.
-            allow_fail:
-                list of exception classes which when raised by `work_func`
-                will be suppressed rather than terminate the operation.
-            halt:
-                a `threading.Event` object. when set, the loop will shut down.
-                if `None`, a new internal `Event` will be instantiated. the
-                splitqueue can still be shut down using the `halt` method.
-            verbose:
-                whether to print allowed exceptions when they arise.
-            use_processes:
-                if `True`, `work_func` workers run in separate processes. else,
-                they run in separate threads. may not work with all types of
-                `work_func` if `True`.
-            empty_callback:
-                A callable. Will be called when `input_queue` is found empty.
-                After each call, it will not be called again until at least one
-                object has been retrieved from `input_queue`.
-            collect_output:
-                if `True`, the return values of `work_func` will be made
-                available, in order of completion. should be set to False
-                if `work_func` operates through side effects exclusively.
-                if `True`, the return values of `work_func` can be accessed
-                through `scraper.outs_q`
-            ignore_none:
-                if `True`, `None` return values will not be put in the
-                output queue, and will be tacitly dropped instead.
+            input_q: input Queue from which arguments are read
+            work_func: function to call on the arguments
+            output_q: output Queue in which to place results. If None, a new
+                Queue is created.
+            halt: Event object which when set will stop execution
+            unpack: if True, the function will be called as `f(*args)`, where
+                args is the value received on input_q. Otherwise, will be
+                called as `f(args)`
+            discard: if `True`, function outputs will not be collected at all.
+            limit: the function will block if there are this many or more
+                outputs in the output queue already. Same semantics as for
+                `Queue(maxsize=)`
         '''
 
-        self.f = work_func
-        self.workers = workers
+        super().__init__(**kwargs)
 
-        if allow_fail is None:
-            allow_fail = []
-        else:
-            assert all([issubclass(e, Exception) for e in allow_fail])
-        # simplifies the processing loop
-        allow_fail.append(cfu.CancelledError)
-        self.allow_fail = allow_fail
+        self.unpack = unpack
+        self.work_func = work_func
+        self.discard = discard
 
-        if use_processes:
-            _work_exe = cfu.ProcessPoolExecutor
-        else:
-            _work_exe = cfu.ThreadPoolExecutor
+        self.input_q = ensure_type(input_q, Queue)
+        self.output_q = ensure_type(output_q, Queue, maxsize=limit)
 
-        if isinstance(input_q, Queue):
-            self.input_q = input_q
-        else:
-            self.input_q = Queue()
-            for arg in input_q:
-                self.input_q.put(arg)
+        self._is_gen = isgenerator(work_func)
 
-        # not Queue so we can use cfu.wait then set difference with 'done'
-        self._wfut_s = set()
-        self._wfut_lock = RLock()
-
-        if output_q is not None:
-            assert isinstance(output_q, Queue)
-            self.output_q = output_q
-        elif collect_output:
-            self.output_q = Queue()
-        else:
-            self.output_q = None
-        self.collect_output = collect_output
-        self.ignore_none = ignore_none
-
-        self._callback_lock = Lock()
-
-        if empty_callback is not None:
-            def _ec(fut):
-                self.input_q.task_done()
-                if self._callback_lock.acquire(blocking=False):
-                    self.input_q.join()
-                    empty_callback()
-            self._ec = _ec
-        else:
-            self._ec = lambda f: None
-
-        self._wx = _work_exe(max_workers=self.workers)
-
-        if halt is None:
-            self._halt = Event()
-        else:
-            assert isinstance(halt, Event)
-            self._halt = halt
-
-        self._sleep_in = 0.2
-        self._sleep_out = 0.2
-
-        self._in_t = Thread(target=self._in_loop, daemon=True,
-                            name='scraper_in')
-        self._out_t = Thread(target=self._out_loop, daemon=True,
-                             name='scraper_out')
-
-    def run(self):
-        self._in_t.start()
-        self._out_t.start()
-        return self
-
-    def halt(self):
-        self._halt.set()
-        qio_log.info('shutting down scraper')
-        with self._wfut_lock:
-            for f in self._wfut_s:
-                f.cancel()
-        self._wx.shutdown(True)
-
-    def num_scheduled(self):
-        with self._wfut_lock:
-            return len(self._wfut_s)
-
-    def _in_loop(self):
+    def _control_loop(self):
         while not self._halt.is_set():
             try:
-                arg = self.input_q.get_nowait()
-                wf = self._wx.submit(self.f, arg)
-                wf.add_done_callback(self._ec)
-                with self._wfut_lock:
-                    self._wfut_s.add(wf)
-            except Empty:
-                time.sleep(self._sleep_in)
-            except Exception:
-                qio_log.warning(
-                    'unexpected exception in _in_loop', exc_info=True)
-        else:
-            self.halt()
+                args = self.input_q.get()
+                if self.unpack:
+                    out = self.work_func(*args)
+                else:
+                    out = self.work_func(args)
 
-    def _out_loop(self):
-        while not self._halt.is_set():
-            with self._wfut_lock:
-                done, pend = cfu.wait(self._wfut_s, timeout=0)
-                self._wfut_s -= done
-            for wf in done:
-                try:
-                    res = wf.result()
-                    if (self.collect_output and
-                            not (self.ignore_none and res is None)):
-                        self.output_q.put(res)
-                except Exception as e:
-                    if all([not isinstance(e, af) for af in self.allow_fail]):
-                        qio_log.critical('disallowed exception', exc_info=True)
-                        self.halt()
-                        break
+                if not self.discard:
+                    if self._is_gen:
+                        for obj in out:
+                            self.output_q.put(obj)
                     else:
-                        qio_log.debug(
-                            'allowed exception raised', exc_info=True)
-            time.sleep(self._sleep_out)
-        else:
-            self.halt()
+                        self.output_q.put(out)
+            except Exception:
+                log.error(f'exception in worker thread', exc_info=True)
+                self.halt()
+
+
+class QueueProcessor(HaltMixin):
+    '''
+    A basic scraper with multiple workers.
+    '''
+
+    def __init__(self, *, input_q, work_func, n_workers,
+                 output_q=None, halt=None, unpack=False, limit=0,
+                 discard=False, **mux_kwargs):
+
+        self.input_q = ensure_type(input_q, Queue)
+        self.output_q = ensure_type(output_q, Queue)
+
+        self.expander = QueueExpander(
+            input_q=self.input_q,
+            n_outputs=n_workers,
+            balance=True,
+            **mux_kwargs,
+        )
+
+        self.work_pipes = [
+            WorkPipe(input_q=win_q, halt=halt, discard=discard,
+                     work_func=work_func, unpack=unpack)
+            for win_q in self.expander.output_qs
+        ]
+
+        self.condenser = QueueCondenser(
+            input_qs=[wp.output_q for wp in self.work_pipes],
+            output_q=self.output_q,
+            **mux_kwargs,
+        )
+
+    def run(self):
+        self.expander.run()
+        for wp in self.work_pipes:
+            wp.run()
+        self.condenser.run()
 
 
 class PoolThrottle:
@@ -402,46 +369,3 @@ class PoolThrottle:
                 else:
                     time.sleep(1e-2 if wait is None else wait)
         return throttled
-
-
-class FunctionPrinter:
-
-    def __init__(self, tab_depth=4):
-        self.depth = 0
-        self.tab_depth = 4
-        self.cur_fn = None
-        self.fn_cache = {}
-
-        self.fresh_line = True
-
-    def decorate(self, f):
-        @wraps(f)
-        def wrapped(*args, **kwargs):
-            self.depth += 1
-            sys.stdout = self
-            self.fn_cache[self.depth] = f.__name__
-            try:
-                return f(*args, **kwargs)
-            finally:
-                self.depth -= 1
-                if self.depth == 0:
-                    sys.stdout = sys.__stdout__
-        return wrapped
-
-    def write(self, s):
-        if self.fresh_line:
-            sys.__stdout__.write('{}{}: {}'.format(' ' * (self.depth - 1) *
-                                                   self.tab_depth,
-                                                   self.fn_cache[self.depth],
-                                                   s)
-                                 )
-        else:
-            sys.__stdout__.write(s)
-
-        if '\n' in s:
-            self.fresh_line = True
-        else:
-            self.fresh_line = False
-
-    def __getattr__(self, attr):
-        return getattr(sys.__stdout__, attr)

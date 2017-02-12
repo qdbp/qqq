@@ -133,21 +133,32 @@ class QFormatter(lgg.Formatter):
         return prefix
 
 
+@lru_cache(maxsize=None)
+def fun_from_frame(frame):
+    for o in gc.get_objects():
+        if inspect.isfunction(o) and o.__code__ is frame.f_code:
+            return o
+
+
 class QLogger(lgg.Logger):
 
     def verbose(self, *args, **kwargs):
         if self.isEnabledFor(VERBOSE):
             self._log(VERBOSE, *args, **kwargs)
 
+    def _log(self, *args, **kwargs):
+        # _log -> info, etc. -> true caller
+        frame = inspect.currentframe().f_back.f_back
+        fun = fun_from_frame(frame)
+        qname = compress_qualname(fun.__qualname__, fun.__module__)
+
+        kwargs['extra'] = kwargs.get('extra', {})
+        kwargs['extra']['qname'] = qname
+
+        return super()._log(*args, **kwargs)
+
 
 lgg.setLoggerClass(QLogger)
-
-
-@lru_cache(maxsize=None)
-def fun_from_frame(frame):
-    for o in gc.get_objects():
-        if inspect.isfunction(o) and o.__code__ is frame.f_code:
-            return o
 
 
 @lru_cache(maxsize=None)
@@ -170,7 +181,7 @@ def compress_qualname(qname, module):
 
     for n in names[:-1]:
         if n.startswith('<'):
-            s += f'<n[1]>'
+            s += f'<{n[1]}>'
         else:
             upper = compress_upcase(n)
             if upper:
@@ -182,25 +193,7 @@ def compress_qualname(qname, module):
     return s + names[-1]
 
 
-def with_stackinfo(logger):
-    old_log = logger._log
-
-    def new_log(self, *args, **kwargs):
-        # _log -> info, etc. -> true caller
-        frame = inspect.currentframe().f_back.f_back
-        fun = fun_from_frame(frame)
-        qname = compress_qualname(fun.__qualname__, fun.__module__)
-
-        kwargs['extra'] = kwargs.get('extra', {})
-        kwargs['extra']['qname'] = qname
-
-        return old_log(self, *args, **kwargs)
-
-    logger._log = new_log
-    return logger
-
-
-def setup_logger(logger, *, fn, do_stdout=False, mode='a'):
+def setup_logger(logger, *, fn, log_to_file, mode='a'):
     logger.setLevel('INFO')
 
     formatter = QFormatter(
@@ -208,26 +201,23 @@ def setup_logger(logger, *, fn, do_stdout=False, mode='a'):
         style='{',
     )
 
-    fn_fmt = QFormatter(
-        '[{levelname:.1s}] {asctime} {qname}: {message}',
-        style='{',
-        do_color=False,
-    )
-    fn_h = lgg.FileHandler(fn, mode=mode)
-    fn_h.setFormatter(fn_fmt)
-    logger.addHandler(fn_h)
-
-    if not hasattr(logger.__class__, 'verbose'):
-
-        logger.__class__.verbose = verbose
-
     handler = lgg.StreamHandler()
     handler.setFormatter(formatter)
     logger.addHandler(handler)
 
+    if log_to_file:
+        fn_fmt = QFormatter(
+            '[{levelname:.1s}] {asctime} {qname}: {message}',
+            style='{',
+            do_color=False,
+        )
+
+        fn_h = lgg.FileHandler(fn, mode=mode)
+        fn_h.setFormatter(fn_fmt)
+        logger.addHandler(fn_h)
 
 
-def get_logger(name, **kwargs):
-    logger = with_stackinfo(lgg.getLogger(name))
-    setup_logger(logger, fn='./log.txt', **kwargs)
+def get_logger(name, log_to_file=True, log_fn='./fn', **kwargs):
+    logger = lgg.getLogger(name)
+    setup_logger(logger, log_to_file=log_to_file, fn=log_fn, **kwargs)
     return logger
