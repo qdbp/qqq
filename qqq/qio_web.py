@@ -27,7 +27,7 @@ from threading import Lock
 from lxml.html import fromstring, etree
 import requests as rqs
 
-from .qio import Scraper
+from .qio import QueueProcessor
 
 
 class HTMLCutter:
@@ -223,8 +223,12 @@ class WebScraper:
 
         self.callbacks = callbacks
 
-        self._scr = Scraper(self.urls_q, self._crawl, output_q=self.output_q,
-                            **kwargs)
+        self._scr = QueueProcessor(
+            input_q=self.urls_q,
+            work_func=self._crawl,
+            output_q=self.output_q,
+            **kwargs
+        )
 
         if crawled is None:
             self.crawled = set()

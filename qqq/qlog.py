@@ -1,6 +1,7 @@
 import gc
 import inspect
 import logging as lgg
+import os.path as osp
 import string
 import sys
 import time
@@ -129,8 +130,7 @@ class QFormatter(lgg.Formatter):
     def formatTime(self, record, datefmt=None):
         t = self.converter(record.created)
         prefix = time.strftime('%Y-%j-', t)
-        prefix += '{:05d}'.format(3600 * t.tm_hour + 60 * t.tm_min + t.tm_sec)
-        return prefix
+        return prefix + f'{3600*t.tm_hour + 60*t.tm_min + t.tm_sec:05d}'
 
 
 @lru_cache(maxsize=None)
@@ -150,6 +150,7 @@ class QLogger(lgg.Logger):
         # _log -> info, etc. -> true caller
         frame = inspect.currentframe().f_back.f_back
         fun = fun_from_frame(frame)
+
         qname = compress_qualname(fun.__qualname__, fun.__module__)
 
         kwargs['extra'] = kwargs.get('extra', {})
@@ -193,31 +194,53 @@ def compress_qualname(qname, module):
     return s + names[-1]
 
 
-def setup_logger(logger, *, fn, log_to_file, mode='a'):
-    logger.setLevel('INFO')
+def setup_logger(logger, *, log_fn, log_level=lgg.INFO,
+                 log_to_stdout=True, log_to_file=True, mode='a'):
+    '''
+    Sets up the logger. Should not be called directly.
 
-    formatter = QFormatter(
-        '[{levelname:.1s}] {asctime} {qname}: {message}',
-        style='{',
-    )
+    Arguments:
+        log_to_stdout (bool): whether to log to stdout
+        log_to_file (bool): whether to log to a file
+        log_level (int): the log level to set the logger to.
+        mode (str): the file open mode for the log file. "w" to overwrite any
+            previous file with the given log name.
+    '''
 
-    handler = lgg.StreamHandler()
-    handler.setFormatter(formatter)
-    logger.addHandler(handler)
+    logger.setLevel(lgg.INFO)
+
+    if log_to_stdout:
+        formatter = QFormatter(
+            '{levelname:.1s} {asctime} {qname}: {message}',
+            style='{',
+        )
+
+        handler = lgg.StreamHandler()
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
 
     if log_to_file:
         fn_fmt = QFormatter(
-            '[{levelname:.1s}] {asctime} {qname}: {message}',
+            '{levelname:.1s} {asctime} {qname}: {message}',
             style='{',
             do_color=False,
         )
 
-        fn_h = lgg.FileHandler(fn, mode=mode)
+        fn_h = lgg.FileHandler(log_fn, mode=mode)
         fn_h.setFormatter(fn_fmt)
         logger.addHandler(fn_h)
 
 
-def get_logger(name, log_to_file=True, log_fn='./fn', **kwargs):
+def get_logger(name, *, log_fn=None, **kwargs):
+    '''
+    Retrieves a qqq-style logger with the given name.
+
+    Arguments:
+        log_fn (bool): if logging to a file, the file name to log to. If
+            this is not given, a sensible default name in the current directory
+            is chosen.
+    '''
+    log_fn = log_fn or f'./qlog_{osp.basename(name)}.txt'
     logger = lgg.getLogger(name)
-    setup_logger(logger, log_to_file=log_to_file, fn=log_fn, **kwargs)
+    setup_logger(logger, log_fn=log_fn, **kwargs)
     return logger

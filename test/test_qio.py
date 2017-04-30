@@ -7,26 +7,55 @@ import threading
 import numpy.random as npr
 import pytest
 
-from qqq.qio import ManyToManyQueueMux, Scraper
-from qqq.qio import PoolThrottle
+import qqq.qio as qio
+
+
+def test_expander():
+    
+    nums = list(range(10))
+    
+    in_q = qio.iterable_to_q(nums)
+    
+    expander = qio.QueueExpander(input_q=in_q, n_outputs=10, balance='rr')
+    expander.run()
+    expander.halt()
+    expander.join()
+
+    for ix, oq in enumerate(expander.output_qs):
+        assert oq.get_nowait() == ix
 
 
 def test_mtmqm():
 
-    in_0 = Queue()
-    in_1 = Queue()
-    in_2 = Queue()
+    in_qs = qio.iterable_to_q(list(range(18)))
+    out_qs = [qio.Queue(maxsize=2) for i in range(6)]
 
-    out_0 = Queue()
-    out_1 = Queue()
+    i = 0
 
-    ins = [in_0, in_1, in_2]
-    outs = [out_0, out_1]
+    def cond_func(key, val):
+        nonlocal i
+        j = i
+        i += 1
+        i = i % 6
+        return j, val
 
-    mtmqm = 
+    qp = qio.ManyToManyQueueMux(
+         input_qs=in_qs, output_qs=out_qs, cond_func=cond_func,
+    )
+    qp.run()
+    time.sleep(1)
+    qp.halt()
+    qp.join()
+
+    for oq in qp.output_qs:
+        while not oq.empty():
+            print(oq.get())
+
+    print([oq.qsize() for oq in qp.output_qs])
+
 
 def test_poolthrottle():
-    pool = PoolThrottle(1, 0.1)
+    pool = qio.PoolThrottle(1, 0.1)
     exe = cfu.ThreadPoolExecutor(max_workers=3)
 
     out = []
@@ -51,10 +80,7 @@ def test_poolthrottle():
     exe.submit(fighter2)
     exe.submit(fighter3)
     exe.shutdown(True)
-
-    print('\n\n\n\n')
-    print(out)
-
+    
 
 if __name__ == '__main__':
     # pytest.main([__file__])

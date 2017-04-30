@@ -1,16 +1,19 @@
+# import pyximport; pyximport.install()  # noqa
+# from .qiox import flif_to_rgba_arr  # noqa
+
 from abc import abstractmethod
-from random import randrange
+from itertools import cycle
+from random import choice, randrange
 import sched
 import time
 from inspect import isgeneratorfunction as isgenerator
 from functools import wraps
-from queue import Empty, Queue
+from queue import Empty, Queue, PriorityQueue, Full
 from threading import Event, Lock, Thread
 
 from .qlog import get_logger
 
 log = get_logger(__file__)
-
 
 def ensure_type(obj, t, *args, **kwargs):
     if obj is None:
@@ -21,7 +24,7 @@ def ensure_type(obj, t, *args, **kwargs):
         return obj
 
 
-def iterable_to_q(iterable):
+def iterable_to_q(iterable) -> Queue:
     q = Queue()
     for item in iterable:
         q.put(item)
@@ -71,6 +74,9 @@ class ControlThreadMixin:
         '''
         self._control_thread.start()
 
+    def join(self, timeout=None):
+        self._control_thread.join(timeout=timeout)
+
     @abstractmethod
     def _control_loop(self):
         '''
@@ -84,29 +90,34 @@ class ManyToManyQueueMux(HaltMixin, ControlThreadMixin):
     '''
 
     def __init__(self, *, input_qs, output_qs, cond_func,
-                 greedy=True, timeout=0.02, **kwargs):
+                 greedy=True, delay=0.1, timeout=0.03, **kwargs):
         '''
         Arguments:
             input_qs (Queue | Iterable[Queue] | Dict[IKey, Queue]):
                 An input queue or collection of input Queues.  If an iterable,
-                the keys will be integer indices.  If single queue will be
-                treated like a singleton iterable.
+                the keys will be the integer indices of the iterable.  If
+                single queue will be treated like a singleton iterable.
             output_qs (Queue | Iterable[Queue] | Dict[OKey, Queue]):
                 An output queue or collection of output Queues.  If an
-                iterable, the keys will be integer indices.  If single queue
-                will be treated like a singleton iterable.
-            cond_func (Callable[Tuple[IKey, Value], Tuple[OKey, Value]]):
+                iterable, the keys will be the integer indices of the iterable.
+                If single queue will be treated like a singleton iterable.
+            cond_func (Callable[Tuple[IKey, Value],
+                                (None | Tuple[OKey, Value])]):
                 A function which takes an input key and a value from the queue
                 and produces an output key and a list of new value. Should not
                 be an expensive computation, as it will be run in the single
-                work thread.
+                work thread. If `None` is returned as the key, the output
+                will be placed in the output queue with the fewest elements.
             greedy (bool):
                 If `True`, will use a greedy strategy, emptying each input
                 queue fully before moving on to the next. Otherwise will
                 alternate strictly between input Queues, up to timeout.
             timeout (float):
-                If no objects are received on an input queue in `timeout`, will
-                move on to the next.
+                Timetout used for internal queue operations. Smaller values
+                increase responsiveness at the expense of busywait CPU usage.
+            delay (float):
+                If an output queue is full, will attempt reinsertion after
+                `delay` seconds.
         '''
         super().__init__(**kwargs)
 
@@ -116,7 +127,28 @@ class ManyToManyQueueMux(HaltMixin, ControlThreadMixin):
         self.cond_func = cond_func
 
         self.greedy = greedy
+
+        self.delay = delay
         self.timeout = timeout
+
+        self._in_cycle = iter(cycle(self.input_q_map.items()))
+        self._prio = PriorityQueue(
+            maxsize=max(len(self.input_qs), len(self.output_qs))
+        )
+
+    def _oq_from_key(self, out_key):
+        if out_key is not None:
+            return self.output_q_map[out_key]
+        else:
+            candidates = sorted(
+                [(oq.qsize(), oq)
+                 for oq in self.output_q_map.values()
+                 if not oq.full()]
+            )
+            if candidates:
+                return candidates[0][1]
+            else:
+                return choice(self.output_qs)
 
     def __rectify_q_arg(self, q_arg):
         if isinstance(q_arg, dict):
@@ -133,17 +165,28 @@ class ManyToManyQueueMux(HaltMixin, ControlThreadMixin):
 
     def _control_loop(self):
         while not self._halt.is_set():
-            for key, in_q in self.input_q_map.items():
-                while True:
-                    try:
-                        obj = in_q.get(timeout=self.timeout)
-                        k, out = self.cond_func(key, obj)
-                        self.output_q_map[k].put(out)
-                    except Empty:
-                        break
+            # read phase
+            while True:
+                if self._prio.full():
+                    break
 
-                    if not self.greedy:
-                        break
+                key, in_q = next(self._in_cycle)
+                try:
+                    obj = in_q.get(timeout=self.timeout)
+                except Empty:
+                    break
+
+                out_key, out = self.cond_func(key, obj)
+                self._prio.put_nowait((time.time(), (out_key, out)))
+            # flush phase
+            for i in range(self._prio.qsize()):
+                try:
+                    due, (out_key, val) = self._prio.get_nowait()
+                    self._oq_from_key(out_key).put(val, timeout=self.timeout)
+                except Empty:
+                    break
+                except Full:
+                    self._prio.put_nowait((due + self.delay, (out_key, val)))
 
 
 class QueueExpander(ManyToManyQueueMux):
@@ -151,22 +194,32 @@ class QueueExpander(ManyToManyQueueMux):
     Splits a queue evenly.
     '''
 
-    def __init__(self, *, input_q, n_outputs, balance, **kwargs):
+    def __init__(self, *, input_q, n_outputs,
+                 balance='min', limit=0, **kwargs):
+        '''
+        Arguments:
+            limit (int): maxsize for the output_qs.
+            balance ('rr' | 'min' | 'rand'): If 'rr', distributes intput
+                to outputs by a round robin scheme. If 'rand', assigns
+                outputs independently uniformly at random. If 'min', assigns
+                inputs to a queue with the minimum number of items.
+        '''
 
-        output_qs = [Queue() for x in range(n_outputs)]
+        output_qs = [Queue(maxsize=limit) for x in range(n_outputs)]
+        self._rr_ix = 0
 
         def expander(key, obj):
-            if balance:
-                ix = None
-                m = float('inf')
-                for qx, q in enumerate(output_qs):
-                    test_m = q.qsize()
-                    if test_m < m:
-                        ix = qx
-                        m = test_m
-                return ix, obj
-            else:
+            # exploit mtmqm behaviour
+            if balance == 'min':
+                return None, obj
+            elif balance == 'rand':
                 return randrange(n_outputs), obj
+            elif balance == 'rr':
+                out = self._rr_ix, obj
+                self._rr_ix = (self._rr_ix + 1) % n_outputs
+                return out
+            else:
+                raise ValueError(f'unknown balancing scheme {balance}')
 
         super().__init__(input_qs=[input_q],
                          output_qs=output_qs,
@@ -179,9 +232,9 @@ class QueueCondenser(ManyToManyQueueMux):
     Condenses many queues to one.
     '''
 
-    def __init__(self, *, input_qs, output_q=None, **kwargs):
+    def __init__(self, *, input_qs, output_q=None, limit=0, **kwargs):
 
-        output_q = ensure_type(output_q, Queue)
+        output_q = ensure_type(output_q, Queue, maxsize=limit)
 
         def condenser(key, obj):
             return 0, obj
@@ -243,6 +296,7 @@ class WorkPipe(HaltMixin, ControlThreadMixin):
                             self.output_q.put(obj)
                     else:
                         self.output_q.put(out)
+
             except Exception:
                 log.error(f'exception in worker thread', exc_info=True)
                 self.halt()
@@ -253,22 +307,29 @@ class QueueProcessor(HaltMixin):
     A basic scraper with multiple workers.
     '''
 
-    def __init__(self, *, input_q, work_func, n_workers,
-                 output_q=None, halt=None, unpack=False, limit=0,
-                 discard=False, **mux_kwargs):
+    def __init__(self, *, input_q, work_func, n_workers, output_q=None,
+                 unpack=False, input_limit=0, output_limit=0,
+                 discard=False, **kwargs):
+        '''
+        Arguments:
+            input_limit (int): limit argument for the expander.
+        '''
+
+        super().__init__(**kwargs)
 
         self.input_q = ensure_type(input_q, Queue)
-        self.output_q = ensure_type(output_q, Queue)
+        self.output_q = ensure_type(output_q, Queue, maxsize=output_limit)
 
         self.expander = QueueExpander(
+            limit=input_limit,
+            halt=self._halt,
             input_q=self.input_q,
             n_outputs=n_workers,
-            balance=True,
-            **mux_kwargs,
+            balance='rr',
         )
 
         self.work_pipes = [
-            WorkPipe(input_q=win_q, halt=halt, discard=discard,
+            WorkPipe(input_q=win_q, halt=self._halt, discard=discard,
                      work_func=work_func, unpack=unpack)
             for win_q in self.expander.output_qs
         ]
@@ -276,7 +337,7 @@ class QueueProcessor(HaltMixin):
         self.condenser = QueueCondenser(
             input_qs=[wp.output_q for wp in self.work_pipes],
             output_q=self.output_q,
-            **mux_kwargs,
+            halt=self._halt,
         )
 
     def run(self):
@@ -284,6 +345,78 @@ class QueueProcessor(HaltMixin):
         for wp in self.work_pipes:
             wp.run()
         self.condenser.run()
+
+    def join(self, timeout=None):
+        self.expander.join(timeout=timeout)
+        for wp in self.work_pipes:
+            wp.join(timeout=timeout)
+        self.condenser.join(timeout=timeout)
+
+
+class ConcurrentProcessor(HaltMixin, ControlThreadMixin):
+
+    def __init__(self, *, input_q, work_func, output_q=None,
+                 collect_output=True, n_workers=8, expand_arg=False,
+                 timeout=1., **kwargs):
+        '''
+        Arguments:
+            input_q (Queue): the work functions get inputs from this queue
+            work_func (Callable): the function to perform on the inputs
+            output_q: (None | Queue): the output Queue. If None and
+                `collect_output`, a new Queue will be instantiated.
+            collect_output (bool): if True, `work_func` output will be put
+                on `output_q` in order of completion. If false, it will be
+                discarded.
+            n_workers (int): number of work threads to spawn
+            expand_arg (bool): if True, the work thread will call
+                `work_func(*arg)` where arg is the object `get`ted from the
+                input_q. Otherwise will call `work_func(arg)`.
+            timeout (float): timeout for reads on the input_q. Only affects
+                the delay between issuing a halt and cessation of processing,
+                so is defaulted to a fairly large value to minimize
+                busywaiting.
+        '''
+
+        super().__init__(**kwargs)
+
+        self.work_func = work_func
+        self.input_q = ensure_type(input_q, Queue)
+
+        self.collect_output = collect_output
+        if self.collect_output:
+            self.output_q = ensure_type(output_q, Queue)
+        else:
+            self.output_q = None
+
+        self.timeout = timeout
+        self.n_workers = n_workers
+        self.expand_arg = expand_arg
+
+        self._work_threads = [
+            Thread(daemon=True, target=self._thread_target)
+            for x in range(n_workers)
+        ]
+
+    def _control_loop(self):
+        for t in self._work_threads:
+            t.start()
+        for t in self._work_threads:
+            t.join()
+
+    def _thread_target(self):
+        while not self._halt.is_set():
+            try:
+                arg = self.input_q.get(timeout=self.timeout)
+            except Empty:
+                continue
+
+            if self.expand_arg:
+                out = self.work_func(*arg)
+            else:
+                out = self.work_func(arg)
+
+            if self.collect_output:
+                self.output_q.put(out)
 
 
 class PoolThrottle:
