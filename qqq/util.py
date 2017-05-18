@@ -1,12 +1,39 @@
+import os.path as osp
+import pickle
 import time
 from threading import Lock
 
 
-def fx(f, x):
-    """ function takes a callable f and argument to said callable x
-        and returns f(x)
-    """
-    return f(x)
+def ensure_type(obj, t, *args, **kwargs):
+    if obj is None:
+        return t(*args, **kwargs)
+    elif not isinstance(obj, t):
+        raise ValueError(f'need a {t.__name__} object, got {obj}')
+    else:
+        return obj
+
+
+def ensure_list(obj):
+    if not isinstance(obj, list):
+        return [obj]
+    else:
+        return obj
+
+
+def check_all_same_length(*args):
+    if len({len(arg) for arg in args}) > 1:
+        raise ValueError('arguments have different lengths!')
+
+
+def pickled(fn, func, *args, **kwargs):
+    if osp.isfile(fn):
+        with open(fn, 'rb') as f:
+            out = pickle.load(f)
+    else:
+        out = func(*args, **kwargs)
+        with open(fn, 'wb') as f:
+            pickle.dump(out, f)
+    return out
 
 
 class Sync:

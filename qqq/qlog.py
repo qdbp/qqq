@@ -2,6 +2,7 @@ import gc
 import inspect
 import logging as lgg
 import os.path as osp
+import re
 import string
 import sys
 import time
@@ -123,9 +124,17 @@ class SplitStream(IOBase):
 
 class QFormatter(lgg.Formatter):
 
-    def __init__(self, *args, do_color=False, **kwargs):
+    UNCOLOR_RE = re.compile(r'\x1b[^m]*m')
+
+    def __init__(self, *args, do_color=False, strip_color=False, **kwargs):
         self.do_color = do_color
+        self.strip_color = strip_color
         super().__init__(*args, **kwargs)
+
+    def format(self, record):
+        if self.strip_color:
+            record.msg = self.UNCOLOR_RE.sub('', record.msg)
+        return super().format(record)
 
     def formatTime(self, record, datefmt=None):
         t = self.converter(record.created)
@@ -224,6 +233,7 @@ def setup_logger(logger, *, log_fn, log_level=lgg.INFO,
             '{levelname:.1s} {asctime} {qname}: {message}',
             style='{',
             do_color=False,
+            strip_color=True,
         )
 
         fn_h = lgg.FileHandler(log_fn, mode=mode)

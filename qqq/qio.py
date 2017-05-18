@@ -12,16 +12,9 @@ from queue import Empty, Queue, PriorityQueue, Full
 from threading import Event, Lock, Thread
 
 from .qlog import get_logger
+from .util import ensure_type
 
 log = get_logger(__file__)
-
-def ensure_type(obj, t, *args, **kwargs):
-    if obj is None:
-        return t(*args, **kwargs)
-    elif not isinstance(obj, t):
-        raise ValueError(f'need a {t.__name__} object, got {obj}')
-    else:
-        return obj
 
 
 def iterable_to_q(iterable) -> Queue:

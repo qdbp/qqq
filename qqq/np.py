@@ -1,3 +1,4 @@
+from functools import lru_cache
 from threading import Lock
 
 import numpy as np
@@ -75,8 +76,7 @@ def _tandem(mode, *args, rs=None):
         if mode == 'shuffle':
             ixes = npr.permutation(l)
         elif mode == 'resample':
-            ixes = npr.choice(np.arange(l, dtype=np.int64),
-                              size=l, replace=True)
+            ixes = npr.randint(l, size=l)
         else:
             raise ValueError('invalid mode in _tandem')
 
@@ -111,6 +111,33 @@ def tandem_resample(*args, rs=None):
     '''
 
     return _tandem('resample', *args, rs=rs)
+
+
+@lru_cache(maxsize=4)
+def hilbert_ixes(width):
+    '''
+    Generates a mapping between the plane and the line.
+
+    Returns:
+        arr: ndarray such that arr[x, y] = hilbert_ix(x, y)
+    '''
+    arr = np.zeros((width, width), dtype=np.uint64)
+
+    proto = np.array([[0, 1], [3, 2]], dtype=np.uint64)
+    arr[:2, :2] = proto[:]
+    l = 2
+
+    while len(proto) < width:
+
+        arr[l:2 * l, :l] += proto.size + proto.T
+        arr[l:2 * l, l:2 * l] = 2 * proto.size + proto.T
+        arr[:l, l:2 * l] = 3 * proto.size + proto[::-1, ::-1]
+
+        proto = arr[:l * 2, :l * 2].copy().T
+        arr = arr.T
+        l = len(proto)
+
+    return arr
 
 
 if __name__ == '__main__':
