@@ -151,17 +151,27 @@ def gen_random_labels(X, n_classes, pvec=None):
     return npr.multinomial(1, pvec, size=num)
 
 
-def dict_tv_split(*ds, f_train=0.85):
+def dict_tv_split(*ds, f_train=0.85, shuffle=True, seed=None):
     vals = []
     for d in ds:
         for v in d.values():
-            vals.append(d)
+            vals.append(v)
 
     n_samples = check_all_same_length(*vals)
     n_train = int(f_train * n_samples)
 
-    train_dicts = tuple({k: v[:n_train] for k, v in d.items()} for d in ds)
-    val_dicts = tuple({k: v[n_train:] for k, v in d.items()} for d in ds)
+    if shuffle:
+        if seed is not None:
+            npr.seed(seed)
+        ixes = npr.permutation(n_samples)
+    else:
+        ixes = np.arange(n_samples)
+
+    t_ixes = ixes[:n_train]
+    v_ixes = ixes[n_train:]
+
+    train_dicts = tuple({k: v[t_ixes] for k, v in d.items()} for d in ds)
+    val_dicts = tuple({k: v[v_ixes] for k, v in d.items()} for d in ds)
 
     return train_dicts, val_dicts
 
@@ -236,16 +246,21 @@ def generate_batches(x_dict, y=None, *, bs=128,  # noqa
             yield xbd
 
 
+def apply_bts(gen, bts, *, train):
+    for bt in bts:
+        gen = bt(gen, train=train)
+    return gen
+
+
 def batch_transformer( # noqa
-    gen, f, *, inplace: bool, mode='each', get_shape=None,
-    in_keys='x0', out_keys=None, pop_in_keys=True, out_in_ys=None):
+    f, *, inplace: bool, mode='each', get_shape=None,
+    in_keys=None, out_keys=None, pop_in_keys=True, out_in_ys=None,
+    train_only=False):
     '''
-    Transforms a function over individual samples into a chainable interator
-    over batches.
+    Transforms functions over individual samples into functions taking
+    batch generators and returning batch generators of transformed data.
 
     Arguments:
-        gen: the generator whose data stream to transform. Must output
-            dicts or tuples of dicts.
         f: the function to apply to individual samples
         inplace: whether the function operates in-place
         mode: how to apply the transformations. 'each' means the function
@@ -272,104 +287,135 @@ def batch_transformer( # noqa
             dictionary. Defaults to using the dictionary of the corresponding
             input key. This default will break if out_keys is of different
             length than in_keys, and should be used carefully if mode is 'mix'.
+        train_only: if True, the transformations will only be applied if the
+            returned generator is instantiated with a `train=True` kwarg.
+
+    Returns:
+        a function taking a generator and a train flag and returning the
+        transformed generator
     '''
 
     get_shape = get_shape or (lambda shape: shape)
 
-    in_keys = ensure_list(in_keys)
+    in_keys = ensure_list(in_keys, allow_none=True)
     if out_keys and inplace:
         raise ValueError('cannot set explicit out_keys if inplace is True')
 
-    out_keys = out_keys or in_keys
-    out_keys = ensure_list(out_keys)
+    in_in_ys = None  # type: ignore
 
-    in_in_ys = None  # List[bool]
+    def bt(gen, train=True):
+        '''
+        Arguments:
+            gen: the generator whose data stream to transform. Must output
+                dicts or tuples of dicts.
+            train: if False, and the batch_transformer defining this function
+                was called with `train_only=True`, the data will be returned
+                unchanged
+        '''
+        nonlocal in_keys
+        nonlocal out_keys
+        nonlocal in_in_ys
+        nonlocal out_in_ys
 
-    while True:
-        xy = next(gen)
-        have_y = isinstance(xy, tuple)
+        while True:
+            xy = next(gen)
+            have_y = isinstance(xy, tuple)
 
-        if have_y:
-            xbd, ybd = xy
-        else:
-            xbd, ybd = xy, None
+            if have_y:
+                xbd, ybd = xy
+            else:
+                xbd, ybd = xy, {}
 
-        bs = check_all_same_length(
-            *xbd.values(), *ybd.values(),
-            msg='differently sized batch elements')
+            bs = check_all_same_length(
+                *xbd.values(), *ybd.values(),
+                msg='differently sized batch elements')
 
-        if in_in_ys is None:
-            in_in_ys = []
-            for in_key in in_keys:
-                if in_key in xbd.keys():
-                    in_in_y = False
-                elif in_key in ybd.keys():
-                    in_in_y = True
+            if train_only and not train:
+                if have_y:
+                    yield xbd, ybd
                 else:
-                    raise KeyError(
-                        f'the key {in_key} was not found. Found keys: '
-                        f'{set(xbd.keys())}, {set(ybd.keys())}'
-                    )
+                    yield xbd
+                continue
 
-                in_in_ys.append(in_in_y)
+            if in_keys is None:
+                # by default, apply transformations to all inputs and no labels
+                in_keys = [*xbd.keys()]
+            if out_keys is None:
+                out_keys = out_keys or in_keys
+            if in_in_ys is None:
+                in_in_ys = []
+                for in_key in in_keys:
+                    if in_key in xbd.keys():
+                        in_in_y = False
+                    elif in_key in ybd.keys():
+                        in_in_y = True
+                    else:
+                        raise KeyError(
+                            f'the key {in_key} was not found. Found keys: '
+                            f'{set(xbd.keys())}, {set(ybd.keys())}'
+                        )
 
-            out_in_ys = out_in_ys or in_in_ys
-            check_all_same_length(
-                out_in_ys, out_keys,
-                msg='output dict specfication must have the same '
-                    'length as the number output keys')
+                    in_in_ys.append(in_in_y)
 
-        if mode == 'each':
-            for ik, ok, iiy, oiy in\
-                    zip(in_keys, out_keys, in_in_ys, out_in_ys):
+                out_in_ys = out_in_ys or in_in_ys
+                check_all_same_length(
+                    out_in_ys, out_keys,
+                    msg='output dict specfication must have the same '
+                        'length as the number output keys')
 
-                zbd_in = ybd if iiy else xbd
-                zb_in = zbd_in[ik]
-                zbd_out = ybd if oiy else xbd
+            if mode == 'each':
+                for ik, ok, iiy, oiy in\
+                        zip(in_keys, out_keys, in_in_ys, out_in_ys):
 
-                if inplace:
-                    for z_in in zb_in:
-                        f(z_in)
-                else:
-                    zb_out = np.zeros((bs,) + get_shape(zb_in.shape[1:]))
+                    zbd_in = ybd if iiy else xbd
+                    zb_in = zbd_in[ik]
+                    zbd_out = ybd if oiy else xbd
 
-                    for bx in range(bs):
-                        zb_out[bx] = f(zb_in[bx])
+                    if inplace:
+                        for z_in in zb_in:
+                            f(z_in)
+                    else:
+                        zb_out = np.zeros((bs,) + get_shape(zb_in.shape[1:]))
+
+                        for bx in range(bs):
+                            zb_out[bx] = f(zb_in[bx])
+
+                        if pop_in_keys:
+                            del zbd_in[ik]
+
+                        zbd_out[ok] = zb_out
+
+            elif mode == 'mix':
+                zb_ins = [
+                    (ybd if iiy else xbd)[ik]
+                    for ik, iiy in zip(in_keys, in_in_ys)
+                ]
+                shapes = get_shape(*[zb_in.shape[1:] for zb_in in zb_ins])
+                zb_outs = [np.zeros((bs,) + shape) for shape in shapes]
+
+                for bx, z_ins in enumerate(zip(*zb_ins)):
+                    rs = f(*z_ins)
+                    for ox, r in enumerate(rs):
+                        zb_outs[ox][bx] = r
+
+                for ik, ok, iiy, oiy, zb_out in\
+                        zip(in_keys, out_keys,  # type: ignore
+                            in_in_ys, out_in_ys, zb_outs):
 
                     if pop_in_keys:
-                        del zbd_in[ik]
+                        del (ybd if iiy else xbd)[ik]
 
-                    zbd_out[ok] = zb_out
+                    (ybd if oiy else xbd)[ok] = zb_out
 
-        elif mode == 'mix':
-            zb_ins = [
-                (ybd if iiy else xbd)[ik]
-                for ik, iiy in zip(in_keys, in_in_ys)
-            ]
-            shapes = get_shape(*[zb_in.shape[1:] for zb_in in zb_ins])
-            zb_outs = [np.zeros((bs,) + shape) for shape in shapes]
+            else:
+                raise ValueError(f'invalid mode {mode}')
 
-            for bx, z_ins in enumerate(zip(*zb_ins)):
-                rs = f(*z_ins)
-                for ox, r in enumerate(rs):
-                    zb_outs[ox][bx] = r
+            if have_y:
+                yield xbd, ybd
+            else:
+                yield xbd
 
-            for ik, ok, iiy, oiy, zb_out in\
-                    zip(in_keys, out_keys,  # type: ignore
-                        in_in_ys, out_in_ys, zb_outs):
-
-                if pop_in_keys:
-                    del (ybd if iiy else xbd)[ik]
-
-                (ybd if oiy else xbd)[ok] = zb_out
-
-        else:
-            raise ValueError(f'invalid mode {mode}')
-
-        if have_y:
-            yield xbd, ybd
-        else:
-            yield xbd
+    return bt
 
 
 def get_k_of_each(y, k):

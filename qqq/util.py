@@ -14,8 +14,13 @@ def ensure_type(obj, t, *args, **kwargs):
         return obj
 
 
-def ensure_list(obj):
-    if not isinstance(obj, list):
+def ensure_list(obj, *, allow_none=False):
+    if obj is None:
+        if allow_none:
+            return None
+        else:
+            raise ValueError('the argument is None!')
+    elif not isinstance(obj, list):
         return [obj]
     else:
         return obj

@@ -2,10 +2,9 @@ from pytest import raises
 import numpy as np
 import numpy.random as npr
 
-from qqq.ml import batch_transformer, generate_batches
-
 
 def test_generate_batches():
+    from qqq.ml import generate_batches
 
     x1 = np.ones((5, 2, 2))
     x2 = np.ones((5, 5)) * 2
@@ -57,6 +56,7 @@ def test_generate_batches():
 
 
 def test_batch_transformer():
+    from qqq.ml import batch_transformer
 
     bs = 50
 
@@ -93,32 +93,62 @@ def test_batch_transformer():
     def f3_shape(shape1, shape2):
         return shape1[:-1], shape2[:-1]
 
-    bt1 = batch_transformer(source_1(), f1, inplace=True)
-    n, _ = next(bt1)
+    flow1 = batch_transformer(f1, inplace=True)(source_1())
+    n, _ = next(flow1)
 
     assert np.allclose(n['x0'], 2.)
-    assert np.allclose(n['x1'], 2.)
+    assert np.allclose(n['x1'], 4.)
 
-    bt2 = batch_transformer(
-        source_1(), f2, inplace=False,
+    flow2 = batch_transformer(
+        f2, inplace=False,
         get_shape=f2_shape, in_keys=['x1', 'x2'], out_keys=['x1', 'xz'],
-    )
+    )(source_1())
 
-    nx, ny = next(bt2)
+    nx, ny = next(flow2)
     assert ny['y0'].shape == (bs,)
     assert nx['x0'].shape == (bs, 10, 20)
     assert nx['x1'].shape == (bs, 2, 3)
     assert nx['xz'].shape == (bs,)
     assert 'x2' not in nx
 
-    bt3 = batch_transformer(
-        source_2(), f3, inplace=False, mode='mix', get_shape=f3_shape,
-        in_keys=['x0', 'y0'], out_keys=['yb', 'x1'], pop_in_keys=True,
-        out_in_ys=[True, False])
+    flow25 = batch_transformer(
+        f2, inplace=False, get_shape=f2_shape, in_keys=['x1']
+    )(source_1())
 
-    nx, ny = next(bt3)
+    nx, ny = next(flow25)
+    assert ny['y0'].shape == (bs,)
+    assert nx['x0'].shape == (bs, 10, 20)
+    assert nx['x1'].shape == (bs, 2, 3)
+
+    flow3 = batch_transformer(
+        f3, inplace=False, mode='mix', get_shape=f3_shape,
+        in_keys=['x0', 'y0'], out_keys=['yb', 'x1'], pop_in_keys=True,
+        out_in_ys=[True, False])(source_2())
+
+    nx, ny = next(flow3)
     assert 'x0' not in nx
     assert 'x1' in nx
     assert 'y0' not in ny
     assert 'yb' in ny
+
+
+def test_dict_tv_split():
+    from qqq.ml import dict_tv_split
+
+    bs = 50
+
+    x = {'xa': np.ones((bs, 5, 5)),
+         'xb': np.arange(bs)}
+
+    y = {'ya': np.arange(bs)}
+    y_bad = {'ya': np.arange(bs + 1) * 3}
+
+    (xt, yt), (xv, yv) = dict_tv_split(x, y, f_train=0.5)
+
+    assert np.allclose(xt['xb'], yt['ya'])
+    assert len(xt['xb']) == 25
+
+    with raises(ValueError):
+        dict_tv_split(x, y_bad)
+
 
