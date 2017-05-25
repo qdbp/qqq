@@ -1,3 +1,4 @@
+from inspect import signature, Parameter
 import os.path as osp
 import pickle
 import time
@@ -20,9 +21,50 @@ def ensure_list(obj):
         return obj
 
 
-def check_all_same_length(*args):
-    if len({len(arg) for arg in args}) > 1:
-        raise ValueError('arguments have different lengths!')
+def kwsift(kw, f):
+    '''
+    Sifts a keyoword argument dictionary with respect to a function.
+
+    Returns a dictionary with those entries that the given function
+    accepts as keyword arguments.
+
+    If the function is found to accept a variadic keyword dictionary
+    (**kwargs), the first argument is returned unchanged, since any keyword
+    argument is therefore legal.
+    '''
+
+    sig = signature(f)
+    kw_kinds = {Parameter.KEYWORD_ONLY, Parameter.POSITIONAL_OR_KEYWORD}
+    out = {}
+    # go backward to catch **kwargs on the first pass
+    for name, p in list(sig.parameters.items())[::-1]:
+        if p.kind == p.VAR_KEYWORD:
+            return kw
+        elif p.kind in kw_kinds and name in kw.keys():
+            out[name] = kw[name]
+
+    return out
+
+
+def check_all_same_length(*args, allow_none=False, msg=None):
+    '''
+    Raises ValueError if arguments' lengths differ.
+
+    Returns arguments' shared length.
+    '''
+    if not args:
+        return 0
+
+    s = {
+        len(arg) for arg in args
+        if not allow_none or arg is not None
+    }
+
+    if len(s) > 1:
+        raise ValueError(
+            f'arguments have different lengths! {s}\n' + (msg or ''))
+
+    return len(args[0])
 
 
 def pickled(fn, func, *args, **kwargs):

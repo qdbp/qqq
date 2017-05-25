@@ -1,5 +1,6 @@
 from keras.engine.topology import Layer
 from keras.layers import Dense
+from keras.optimizers import SGD
 from keras import backend as K
 
 import numpy as np
@@ -67,3 +68,8 @@ class NegGrad(Layer):
 
     def set_lbd(self, lbd):
         self.lbd.set_value(lbd)
+
+
+# ACTIVATIONS
+def negabs(x):
+    return -K.abs(x)

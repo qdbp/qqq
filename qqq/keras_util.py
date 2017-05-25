@@ -55,16 +55,24 @@ def shuffle_weights(weights):
     return [npr.permutation(w.flat).reshape(w.shape) for w in weights]
 
 
-def get_callbacks(name, *, pat_stop=9, pat_lr=4):
-    return [
-        kcb.EarlyStopping(patience=pat_stop),
-        kcb.ReduceLROnPlateau(patience=pat_lr, factor=0.2),
-        kcb.ModelCheckpoint(f'./weights/{name}.hdf5', save_best_only=True),
+def get_callbacks(name, *, pat_stop=9, pat_lr=4, plot=True, val=True):
+    '''
+    Returns some sensible default callbacks for Keras model training.
+    '''
+    monitor = 'val_loss' if val else 'loss'
+    out = [
+        kcb.ModelCheckpoint(f'./weights/{name}.hdf5', save_best_only=val),
         ValLossPP(),
         KQLogger(name),
-        LiveLossPlot(name),
+        kcb.ReduceLROnPlateau(patience=pat_lr, factor=0.2, monitor=monitor),
+        kcb.EarlyStopping(patience=pat_stop, monitor=monitor),
+        # HypergradientScheduler(),
     ]
 
+    if plot:
+        out.append(LiveLossPlot(name))
+
+    return out
 
 # DATA
 def standard_mnist(flatten=True):
@@ -145,15 +153,26 @@ class KArch:
         pass
 
 
+class HypergradientScheduler(Callback):
+    '''
+    A learning rate scheduler that plays nice with other schedulers by
+    mixing in a multiplier rather than overwriting the lr wholesale.
+    '''
+    # FIXME: can only be feasibly implemented as an optimizer
+
+
+
 class KQLogger(Callback):
 
     def __init__(self, name):
         self.name = name
         self.best_val_loss = np.inf
+        self.last_epoch = 0
 
-    def on_epoch_end(self, logs):
+    def on_epoch_end(self, epoch, logs):
         self.best_val_loss =\
             min(logs.get('val_loss', np.inf), self.best_val_loss)
+        self.last_epoch += 1
 
     def on_train_begin(self, logs):
         LOG.info(f'begin training model {self.name}'.upper())
@@ -161,7 +180,11 @@ class KQLogger(Callback):
     def on_train_end(self, logs):
         if self.best_val_loss < np.inf:
             LOG.info(f'best val loss {self.best_val_loss:.4f}')
-        LOG.info(f'end training model {self.name}'.upper())
+        LOG.info(
+            f'end training model {self.name},'
+            f' {self.last_epoch} epochs'.upper()
+        )
+
 
 class ValLossPP(Callback):
 
@@ -187,7 +210,6 @@ class ValLossPP(Callback):
 
     def on_epoch_end(self, epoch, logs):  # noqa
         self.counter.close()
-        # out = f'Epoch {epoch}\n'
         print(f'Epoch {epoch}')
 
         greens = set()
@@ -214,27 +236,27 @@ class ValLossPP(Callback):
             else:
                 losses[key] = val
 
-        for key in val_losses.keys():
-            vl = val_losses[key]
-            tl = losses[key[4:]]
+        for key in losses.keys():
+            tls = '{:.3f}'.format(losses[key])
+            vl = val_losses.get('val_' + key)
+            if vl is None:
+                vls = '---'
+            else:
+                vls = '{:.3f}'.format(vl)
 
-            vls = '{:.3f}'.format(float(vl))
-            tls = '{:.3f}'.format(float(tl))
-
-            if key in greens:
+            if 'val_' + key in greens:
                 vls = fg('green') + attr('bold') + vls + attr('reset')
 
             # out += f'{key[4:]:-<40.40s}: train {tls} - {vls} val\n'
-            print(f'{key[4:]:-<40.40s}: train {tls} - {vls} val')
+            print(f'{key:-<40.40s}: train {tls} - {vls} val')
 
 
 class LiveLossPlot(Callback):
 
-    def __init__(self, name, plot_style=None,
-                 batches_per_point=10, bpp_inflation=1.1):
+    def __init__(self, name, plot_style=None, bpp=10, bpp_inflation=1.1):
 
         self.name = name
-        self.batches_per_point = batches_per_point
+        self.bpp = bpp
         self.bpp_mult = 1.0
         self.bpp_inflation = bpp_inflation
 
@@ -245,8 +267,15 @@ class LiveLossPlot(Callback):
         self.line_data = {}
 
         self.monotonic_batch = 0
+        self.next_plot_batch = bpp
         self.exe = cfu.ThreadPoolExecutor(max_workers=1)
         self._setup_axes()
+
+    def _get_lab_axis(self, lab):
+        return self.ax if not self._is_lab_acc(lab) else self.ax_acc
+
+    def _is_lab_acc(self, lab):
+        return 'accuracy' in lab
 
     def _setup_axes(self):
         self.fig = plt.figure()
@@ -256,13 +285,19 @@ class LiveLossPlot(Callback):
         self.ax.set_title(f'{self.name} training plot')
         self.ax.set_ylabel('loss')
         self.ax.set_xlabel('batch')
-
         self.ax.set_xscale('log')
-
         self.ax.yaxis.set_minor_locator(mtick.AutoMinorLocator(n=5))
         self.ax.yaxis.set_minor_formatter(mtick.NullFormatter())
         self.ax.grid(b=True, which='major', color='#999999', lw=0.3)
         self.ax.grid(b=True, which='minor', color='#aaaaaa', lw=0.3, ls=':')
+
+        self.ax_acc = self.ax.twinx()
+        self.ax_acc.grid(b=True, which='major', color='#999999', lw=0.3)
+        self.ax_acc.grid(
+            b=True, which='minor', color='#aaaaaa', lw=0.3, ls=':')
+
+        self.ax_acc.set_ylabel('accuracy')
+        self.ax_acc.set_ylim((0.5, 1))
 
         os.makedirs('./plots/', exist_ok=True)
 
@@ -270,41 +305,51 @@ class LiveLossPlot(Callback):
         batch = data.pop('batch')
 
         to_plot = []
+        to_plot_acc = []
+
         colors = []
+        colors_acc = []
+
         new_lines = False
         for lab, loss in data.items():
             if lab not in self.proxy_lines:
-                self.proxy_lines[lab] = self.ax.plot([], [], label=lab,)[0]
+                self.proxy_lines[lab] =\
+                    self._get_lab_axis(lab).plot([], [], label=lab,)[0]
                 self.line_data[lab] = [(batch, loss)]
                 new_lines = True
             else:
+                plot_arr = to_plot_acc if self._is_lab_acc(lab) else to_plot
+                c_arr = colors_acc if self._is_lab_acc(lab) else colors
+
                 self.line_data[lab].append((batch, loss))
-                to_plot.append(self.line_data[lab][-2:])
-                colors.append(self.proxy_lines[lab].get_color())
+                plot_arr.append(self.line_data[lab][-2:])
+                c_arr.append(self.proxy_lines[lab].get_color())
 
         if new_lines:
             self.ax.legend(loc=3)
 
         if to_plot:
             lc = mplc.LineCollection(to_plot, colors=colors, linewidths=0.75)
+            lc_acc = mplc.LineCollection(
+                to_plot_acc, colors=colors_acc, linewidths=0.75)
             self.ax.add_collection(lc)
+            self.ax_acc.add_collection(lc_acc)
             self.ax.autoscale()
             self.ax.set_ylim(bottom=0)
             self.ax.set_xlim(left=1)
             self.ax.margins(0.1)
+            self.ax_acc.set_ylim((0.5, 1))
 
             self.fig.canvas.draw()
             self.fig.savefig(f'./plots/{self.name}.svg')
 
-            self.bpp_mult *= self.bpp_inflation
-
     def on_batch_end(self, batch, logs):
 
-        add_point =\
-            not bool(
-                (self.monotonic_batch - 1) %
-                int(self.batches_per_point * self.bpp_mult)
-            )
+        add_point = all((
+            bool(self.monotonic_batch),
+            self.monotonic_batch == self.next_plot_batch,
+        ))
+
         if add_point:
             to_append = dict(batch=self.monotonic_batch)
 
@@ -321,6 +366,8 @@ class LiveLossPlot(Callback):
 
         if add_point:
             self.exe.submit(self._update_plot, to_append)
+            self.next_plot_batch += int(self.bpp_mult * self.bpp)
+            self.bpp_mult *= self.bpp_inflation
 
         self.monotonic_batch += 1
 

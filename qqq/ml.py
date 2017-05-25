@@ -1,16 +1,16 @@
+from typing import Dict, List, Set # noqa
+from warnings import warn
+
 import numpy as np
 import numpy.random as npr
 import theano as th
-import theano.tensor.nnet as thn
 import theano.tensor as T
 from tqdm import tqdm
-
-from typing import Dict, List, Set # noqa
 
 from .util import ensure_list, check_all_same_length
 
 
-def gen_mlc_weights(Y, a=1, dist_weight=1, n_iter=25000):
+def gen_mlc_weights(Y, a=0.01, dist_weight=1, n_iter=100000, lbd=0.05):
     '''
     Generates multilabel classification sample weights.
 
@@ -28,11 +28,14 @@ def gen_mlc_weights(Y, a=1, dist_weight=1, n_iter=25000):
 
     N = Y.shape[0]
 
-    t_Hp_fac = th.shared(dist_weight / np.log(N))
+    # t_Hp_fac = th.shared(dist_weight / np.log(N))
     t_Hb_fac = th.shared(1 / (Y.shape[1] * np.log(2)))
 
-    t_softits = th.shared(npr.normal(0, 1, Y.shape[0]))
+    t_softits = th.shared(npr.normal(-np.log(N), 0.1, Y.shape[0]))
     t_Y = th.shared(Y)
+
+    # t_base_prob = th.shared(-np.log(N))
+    # t_lambda = th.shared(0.1)
 
     def softmax(arr):
         e = T.exp(arr)
@@ -43,35 +46,41 @@ def gen_mlc_weights(Y, a=1, dist_weight=1, n_iter=25000):
 
     def entropy(softits):
         p = softmax(softits)
-        return -T.dot(p, T.log(p))
+        return -T.sum(p * T.log(p))
 
-    dist_gain = t_Hp_fac * entropy(t_softits)
-    marg = T.dot(thn.softmax(t_softits), t_Y)
+    # dist_gain = t_Hp_fac * entropy(t_softits)
+    marg = T.dot(softmax(t_softits), t_Y)
     marg_gain = t_Hb_fac * bentropy(marg)
-    t_gain = dist_gain + marg_gain
+    # reg_loss = t_lambda * T.mean((t_softits - t_base_prob) ** 2)
+    reg_loss = lbd * (T.max(t_softits) - T.min(t_softits))
+    # t_gain = dist_gain + marg_gain - reg_loss
+    t_gain = marg_gain - reg_loss
 
     t_a = th.shared(a)
     # ghetto nesterov momentum
-    t_b = th.shared(1 - 0.9999)
+    t_b = th.shared(0.999)
     t_d = th.shared(np.zeros(Y.shape[0]))
     g = th.grad(t_gain, t_softits)
 
     f = th.function(
         [],
-        [dist_gain, marg_gain],
+        # [dist_gain, marg_gain, reg_loss],
+        [marg_gain, reg_loss],
         updates=[
             (t_softits, t_softits + t_a * t_d),
             (t_d, t_b * t_d + g),
         ],
     )
 
+    print(f()[0])
     pbar = tqdm(range(n_iter), desc='optimizing sampling distribution')
     for i in pbar:
         x = f()
         if not i % 100:
             pbar.set_description(
-                f'normed sampling distribution entropy {float(x[0]):4.3f}, '
-                f'normed marginal entropy {float(x[1]):4.3f}'
+                # f'normed sampling distribution entropy {float(x[0]):4.3f}, '
+                f'normed marginal entropy {float(x[0]):4.3f} '
+                f'regularizer loss {float(x[1]):4.3f}'
             )
 
     return th.function([], [softmax(t_softits)])()[0]
@@ -142,30 +151,45 @@ def gen_random_labels(X, n_classes, pvec=None):
     return npr.multinomial(1, pvec, size=num)
 
 
-def generate_batches(x, xn: str, y=None, yn=None, *, bs=128,  # noqa
+def dict_tv_split(*ds, f_train=0.85):
+    vals = []
+    for d in ds:
+        for v in d.values():
+            vals.append(d)
+
+    n_samples = check_all_same_length(*vals)
+    n_train = int(f_train * n_samples)
+
+    train_dicts = tuple({k: v[:n_train] for k, v in d.items()} for d in ds)
+    val_dicts = tuple({k: v[n_train:] for k, v in d.items()} for d in ds)
+
+    return train_dicts, val_dicts
+
+
+def generate_batches(x_dict, y=None, *, bs=128,  # noqa
                      balance=False, sample_weights=None, sequential=False):
     '''
     Generate batches of data from a larger array.
 
     Arguments:
-        x: input array
-        y: label array
-        bs: batch size
+        x_dict: input dictionary of input names to arrays
+        y_dict: label dictionary of label names to arrays
+        bs: size of batch to generate
         balance: if y is one-hot: if True, return batches with balanced
             classes, on average.
+        sample_weights: possibly unnormalized probabilities with which to
+            draw each sample, independently. Supersedes `balance`.
+        sequential: if True, will iterate over the input arrays in sequence,
+            yielding contiguous batches. Still yields forever, looping to the
+            start when input arrays are exhausted
+    Yields:
+        Xb: dictionary of x batches
+        Yb: dictionary of y batches, or None
     '''
-    have_y = y is not None
-    if have_y and yn is None:
-        raise ValueError('need to give names to y values if they are given')
+    y_dict = y or {}
+    have_y = bool(y_dict)
 
-    x, y = ensure_list(x), ensure_list(y)
-    xn, yn = ensure_list(xn), ensure_list(yn)
-
-    check_all_same_length(*xn, *yn)
-
-    if len(xn) != len(x) or len(yn) != len(y):
-        raise ValueError(
-            f'wrong number of names! {len(xn), len(x)}, {len(yn), len(y)}')
+    n_samples = check_all_same_length(*x_dict.values(), *y_dict.values())
 
     # explicit weights overrde balancing
     have_sw = sample_weights is not None
@@ -174,46 +198,47 @@ def generate_batches(x, xn: str, y=None, yn=None, *, bs=128,  # noqa
         balance = False
 
     elif balance and have_y:
-        if len(y) != 1:
-            raise TypeError(
-                'balancing is undefined unless y '
-                'is a single array of 1-hot vectors'
-            )
-        n_per_class = y[0].sum(axis=0, dtype=np.uint64)
-        n_classes = y[0].shape[1]
-        p_ixes = y[0].argmax(axis=1)
+        if len(list(y_dict)) != 1:
+            raise ValueError(
+                'balancing is undefined when multiple label sets are present')
+
+        y_arr = list(y_dict.values())[0]
+        if np.max(y_arr.sum(axis=1) > 1.):
+            warn('given label array does not appear to be one-hot encoded',
+                 RuntimeWarning)
+
+        n_per_class = y_arr.sum(axis=0, dtype=np.uint64)
+        n_classes = y_arr.shape[1]
+        p_ixes = y_arr.argmax(axis=1)
         probs = (
-            np.ones(len(y[0]), dtype=np.float64) /
+            np.ones(len(y_arr), dtype=np.float64) /
             (n_classes * n_per_class[p_ixes])
         )
     else:
-        probs = np.ones(x[0].shape[0]) / x[0].shape[0]
+        probs = np.ones(n_samples) / n_samples
 
-    ix_arange = npr.permutation(len(x[0]))
-
+    ix_arange = np.arange(n_samples, dtype=np.uint64)
     seq = 0
+
     while True:
         if sequential:
-            ixes = np.arange(seq, seq + bs) % x[0].shape[0]
-            seq = (seq + bs) % x[0].shape[0]
+            ixes = np.arange(seq, seq + bs) % n_samples
+            seq = (seq + bs) % n_samples
         else:
             ixes = npr.choice(ix_arange, size=bs, p=probs)
 
-        Xb = [sub_x[ixes] for sub_x in x]
-        X_out = {n: x for n, x in zip(xn, Xb)}
+        xbd = {k: x[ixes] for k, x in x_dict.items()}
 
         if have_y:
-            Yb = [sub_y[ixes] for sub_y in y]
-            Y_out = {n: y for n, y in zip(yn, Yb)}
-
-            yield X_out, Y_out
+            ybd = {k: y[ixes] for k, y in y_dict.items()}
+            yield xbd, ybd
         else:
-            yield X_out
+            yield xbd
 
 
-def batch_transformer(gen, f, *, inplace: bool,  # noqa
-                      joint=False, get_shape=None,
-                      in_key='x0', out_key='x0'):
+def batch_transformer( # noqa
+    gen, f, *, inplace: bool, mode='each', get_shape=None,
+    in_keys='x0', out_keys=None, pop_in_keys=True, out_in_ys=None):
     '''
     Transforms a function over individual samples into a chainable interator
     over batches.
@@ -222,61 +247,129 @@ def batch_transformer(gen, f, *, inplace: bool,  # noqa
         gen: the generator whose data stream to transform. Must output
             dicts or tuples of dicts.
         f: the function to apply to individual samples
-        inplace: True indicates the function is in-place and will overwrite
-            the batch array
+        inplace: whether the function operates in-place
+        mode: how to apply the transformations. 'each' means the function
+            will be applied to each input in in_keys and output on the
+            same key. 'mix' means the function will be called with the values
+            corresponding to each of the in_keys as an argument, and is
+            expected to produce a value for each of the output keys.
         get_shape: calculate the output shape from the input shape for
             individual samples. Has no meaning if `inplace` is True. If None,
-            output shape is assumed unchanged by the function.
+            output shape is assumed unchanged by the function.  If mode is
+            'mix', assumed to the shapes corresponding to the input keys as
+            arguments and to return a shape for each of the output keys, in
+            their respective order.
+        in_keys: the input keys over which to operate. Can be in either the
+            x or the y dict
+        out_keys: the output keys to which to move the input. Defaults to
+            `in_keys`.
+        pop_in_keys: if True, input keys will be popped from the dictionary.
+            Naturally, if some output keys share the names of some input
+            keys, they will be set after the originals are deleted and will
+            be present in the output.
+        out_in_ys: list of bools, of same length as out_keys. A True entry
+            indicates the corresponding output should be placed in the y
+            dictionary. Defaults to using the dictionary of the corresponding
+            input key. This default will break if out_keys is of different
+            length than in_keys, and should be used carefully if mode is 'mix'.
     '''
 
     get_shape = get_shape or (lambda shape: shape)
 
-    if in_key is None:
-        in_key = 'x0'
-    if out_key is None:
-        out_key = 'x0'
+    in_keys = ensure_list(in_keys)
+    if out_keys and inplace:
+        raise ValueError('cannot set explicit out_keys if inplace is True')
+
+    out_keys = out_keys or in_keys
+    out_keys = ensure_list(out_keys)
+
+    in_in_ys = None  # List[bool]
 
     while True:
         xy = next(gen)
+        have_y = isinstance(xy, tuple)
 
-        if isinstance(xy, tuple):
-            xbd_in, ybd_in = xy
+        if have_y:
+            xbd, ybd = xy
         else:
-            xbd_in, ybd_in = xy, None
+            xbd, ybd = xy, None
 
-        if not joint:
-            out_in_y = False
-            if in_key in xbd_in.keys():
-                zb_in = xbd_in[in_key]
-            elif in_key in ybd_in.keys():
-                out_in_y = True
-                zb_in = ybd_in[in_key]
-            else:
-                raise ValueError(
-                    'the value of inplace must correspond to a data key')
+        bs = check_all_same_length(
+            *xbd.values(), *ybd.values(),
+            msg='differently sized batch elements')
 
-            xbd_out, ybd_out = xbd_in, ybd_in
-
-            if inplace:
-                for z_in in zb_in:
-                    f(z_in)
-
-            else:
-                zb_out = np.zeros(
-                    zb_in.shape[0:1] + get_shape(zb_in.shape[1:])
-                )
-                for z_out, z_in in zip(zb_out, zb_in):
-                    z_out[:] = f(z_in)
-
-                if out_in_y:
-                    ybd_out[out_key] = zb_out
+        if in_in_ys is None:
+            in_in_ys = []
+            for in_key in in_keys:
+                if in_key in xbd.keys():
+                    in_in_y = False
+                elif in_key in ybd.keys():
+                    in_in_y = True
                 else:
-                    xbd_out[out_key] = zb_out
+                    raise KeyError(
+                        f'the key {in_key} was not found. Found keys: '
+                        f'{set(xbd.keys())}, {set(ybd.keys())}'
+                    )
+
+                in_in_ys.append(in_in_y)
+
+            out_in_ys = out_in_ys or in_in_ys
+            check_all_same_length(
+                out_in_ys, out_keys,
+                msg='output dict specfication must have the same '
+                    'length as the number output keys')
+
+        if mode == 'each':
+            for ik, ok, iiy, oiy in\
+                    zip(in_keys, out_keys, in_in_ys, out_in_ys):
+
+                zbd_in = ybd if iiy else xbd
+                zb_in = zbd_in[ik]
+                zbd_out = ybd if oiy else xbd
+
+                if inplace:
+                    for z_in in zb_in:
+                        f(z_in)
+                else:
+                    zb_out = np.zeros((bs,) + get_shape(zb_in.shape[1:]))
+
+                    for bx in range(bs):
+                        zb_out[bx] = f(zb_in[bx])
+
+                    if pop_in_keys:
+                        del zbd_in[ik]
+
+                    zbd_out[ok] = zb_out
+
+        elif mode == 'mix':
+            zb_ins = [
+                (ybd if iiy else xbd)[ik]
+                for ik, iiy in zip(in_keys, in_in_ys)
+            ]
+            shapes = get_shape(*[zb_in.shape[1:] for zb_in in zb_ins])
+            zb_outs = [np.zeros((bs,) + shape) for shape in shapes]
+
+            for bx, z_ins in enumerate(zip(*zb_ins)):
+                rs = f(*z_ins)
+                for ox, r in enumerate(rs):
+                    zb_outs[ox][bx] = r
+
+            for ik, ok, iiy, oiy, zb_out in\
+                    zip(in_keys, out_keys,  # type: ignore
+                        in_in_ys, out_in_ys, zb_outs):
+
+                if pop_in_keys:
+                    del (ybd if iiy else xbd)[ik]
+
+                (ybd if oiy else xbd)[ok] = zb_out
 
         else:
-            raise NotImplementedError
+            raise ValueError(f'invalid mode {mode}')
 
-        yield xbd_out, ybd_out
+        if have_y:
+            yield xbd, ybd
+        else:
+            yield xbd
 
 
 def get_k_of_each(y, k):
