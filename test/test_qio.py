@@ -55,7 +55,7 @@ def test_mtmqm():
 
 
 def test_poolthrottle():
-    pool = qio.PoolThrottle(1, 0.1)
+    pool = qio.PoolThrottle(pool=1, window=0.1)
     exe = cfu.ThreadPoolExecutor(max_workers=3)
 
     out = []

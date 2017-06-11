@@ -10,15 +10,18 @@ from inspect import isgeneratorfunction as isgenerator
 from functools import wraps
 from queue import Empty, Queue, PriorityQueue, Full
 from threading import Event, Lock, Thread
+from typing import TypeVar, Iterable, List, Any
 
 from .qlog import get_logger
 from .util import ensure_type
 
 log = get_logger(__file__)
 
+T = TypeVar('T')
 
-def iterable_to_q(iterable) -> Queue:
-    q = Queue()
+
+def iterable_to_q(iterable: Iterable[T]):
+    q = Queue()  # type: Queue[T]
     for item in iterable:
         q.put(item)
     return q
@@ -38,8 +41,8 @@ class HaltMixin:
         '''
 
         self._halt = ensure_type(halt, Event)
-
-        super().__init__(**kwargs)
+        # XXX mypy doesn't like mixins? or am I doing something dumb?
+        super().__init__(**kwargs)  # type: ignore
 
     def halt(self):
         '''
@@ -59,7 +62,7 @@ class ControlThreadMixin:
 
         self._control_thread = Thread(target=self._control_loop, daemon=True)
 
-        super().__init__(**kwargs)
+        super().__init__(**kwargs)  # type: ignore
 
     def run(self):
         '''
@@ -151,7 +154,7 @@ class ManyToManyQueueMux(HaltMixin, ControlThreadMixin):
             out = [q_arg]
             out_map = {0: q_arg}
         elif isinstance(q_arg, (list, tuple)):
-            out = q_arg
+            out = list(q_arg)
             out_map = {ix: q for ix, q in enumerate(q_arg)}
 
         return out, out_map
@@ -198,7 +201,9 @@ class QueueExpander(ManyToManyQueueMux):
                 inputs to a queue with the minimum number of items.
         '''
 
-        output_qs = [Queue(maxsize=limit) for x in range(n_outputs)]
+        output_qs = [
+            Queue(maxsize=limit) for x in range(n_outputs)
+        ]  # type: List[Queue[Any]]
         self._rr_ix = 0
 
         def expander(key, obj):
@@ -246,7 +251,8 @@ class WorkPipe(HaltMixin, ControlThreadMixin):
     '''
 
     def __init__(self, *, input_q, work_func, output_q=None,
-                 unpack=False, discard=False, limit=0, **kwargs):
+                 unpack=False, discard=False, discard_empty=True,
+                 limit=0, **kwargs):
         '''
         Arguments:
             input_q: input Queue from which arguments are read
@@ -258,6 +264,8 @@ class WorkPipe(HaltMixin, ControlThreadMixin):
                 args is the value received on input_q. Otherwise, will be
                 called as `f(args)`
             discard: if `True`, function outputs will not be collected at all.
+            discard_empty: if `True`, function outputs will not be collected
+                if they evaluate to `False`.
             limit: the function will block if there are this many or more
                 outputs in the output queue already. Same semantics as for
                 `Queue(maxsize=)`
@@ -268,6 +276,7 @@ class WorkPipe(HaltMixin, ControlThreadMixin):
         self.unpack = unpack
         self.work_func = work_func
         self.discard = discard
+        self.discard_empty = discard_empty
 
         self.input_q = ensure_type(input_q, Queue)
         self.output_q = ensure_type(output_q, Queue, maxsize=limit)
@@ -286,8 +295,9 @@ class WorkPipe(HaltMixin, ControlThreadMixin):
                 if not self.discard:
                     if self._is_gen:
                         for obj in out:
-                            self.output_q.put(obj)
-                    else:
+                            if bool(obj) or not self.discard_empty:
+                                self.output_q.put(obj)
+                    elif bool(out) or not self.discard_empty:
                         self.output_q.put(out)
 
             except Exception:
@@ -349,7 +359,8 @@ class QueueProcessor(HaltMixin):
 class ConcurrentProcessor(HaltMixin, ControlThreadMixin):
 
     def __init__(self, *, input_q, work_func, output_q=None,
-                 collect_output=True, n_workers=8, expand_arg=False,
+                 collect_output=True, collect_empty=False,
+                 n_workers=8, expand_arg=False,
                  timeout=1., **kwargs):
         '''
         Arguments:
@@ -360,6 +371,9 @@ class ConcurrentProcessor(HaltMixin, ControlThreadMixin):
             collect_output (bool): if True, `work_func` output will be put
                 on `output_q` in order of completion. If false, it will be
                 discarded.
+            collect_emtpy (bool): if False, `work_func` output that evaluates
+                to False (e.g. empty dicts) will not be added to the output
+                queue. Has no effect if `collect_output` is `False`.
             n_workers (int): number of work threads to spawn
             expand_arg (bool): if True, the work thread will call
                 `work_func(*arg)` where arg is the object `get`ted from the
@@ -380,6 +394,7 @@ class ConcurrentProcessor(HaltMixin, ControlThreadMixin):
             self.output_q = ensure_type(output_q, Queue)
         else:
             self.output_q = None
+        self.collect_empty = collect_empty
 
         self.timeout = timeout
         self.n_workers = n_workers
@@ -408,7 +423,8 @@ class ConcurrentProcessor(HaltMixin, ControlThreadMixin):
             else:
                 out = self.work_func(arg)
 
-            if self.collect_output:
+            if self.collect_output and (self.collect_empty or bool(out)):
+                print(f'collecting {out}')
                 self.output_q.put(out)
 
 
@@ -427,13 +443,13 @@ class PoolThrottle:
     Call order is preserved.
     '''
 
-    def __init__(self, pool_size, window, strict=False):
+    def __init__(self, *, pool: int, window: int, strict=False) -> None:
         '''
         Args:
-            pool_size:
+            pool:
                 max requests allowed in a sliding window of `window` seconds
             window:
-                sliding span of time in which `pool_size` requests are allowed
+                sliding span of time in which `pool` requests are allowed
             res:
                 time resolution with which call attempts are made if the pool
                 is full
@@ -443,7 +459,7 @@ class PoolThrottle:
                 is made. A strict pool effectively makes X calls every (Y +
                 average_call_time) seconds.
         '''
-        self.pool_size = pool_size
+        self.pool = pool
         self.window = window
         self.strict = strict
 
@@ -479,7 +495,7 @@ class PoolThrottle:
                 # don't do actual function call with the lock
 
                 with self._ifl_lock:
-                    do_call = (self._ifl < self.pool_size and
+                    do_call = (self._ifl < self.pool and
                                number == self._now_serving)
                     if do_call:
                         self._ifl += 1

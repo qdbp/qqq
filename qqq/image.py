@@ -119,7 +119,7 @@ def chunk_image_shape(shape, chunk_size=32):
     return (n_c, chunk_size, chunk_size, shape[2])
 
 
-def shift_colors(img_arr, *, components, scale=0.1):
+def shift_colors(img_arr, *, components, scale=0.05):
     '''
     Adjust colors a la Krizhevsky et al (2012).
 
@@ -149,14 +149,10 @@ def hilbertize_image_shape(img_shape):
     return (img_shape[0] * img_shape[1], img_shape[2])
 
 
-def color_pca(img_arr, *, components):
+def color_zca(img_arr, *, mu, W):
     '''
     Transforms the image colorspace into the space defined by the given
     components.
     '''
 
-    return img_arr @ components
-
-
-def color_pca_shape(shape, *, components):
-    return shape[:-1] + components.shape[-1:]
+    img_arr[:] = (img_arr - mu) @ W

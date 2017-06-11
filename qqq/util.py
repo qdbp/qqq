@@ -1,3 +1,4 @@
+from functools import wraps
 from inspect import signature, Parameter
 import os.path as osp
 import pickle
@@ -24,6 +25,16 @@ def ensure_list(obj, *, allow_none=False):
         return [obj]
     else:
         return obj
+
+
+def kws(f):
+    '''
+    Lets the wrapped function silently ignore invalid kwargs.
+    '''
+    @wraps(f)
+    def _f(*args, **kwargs):
+        return f(*args, **kwsift(kwargs, f))
+    return _f
 
 
 def kwsift(kw, f):

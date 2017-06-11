@@ -20,177 +20,179 @@ Classes:
         would extract a list of all Capitalized words contained inside
         <p class="main-text"> tags, including text wrapped in <a> tags.
 '''
+from collections import defaultdict
+from enum import Enum, auto
+from functools import partial
 from queue import Queue
 import re
+import sys
 from threading import Lock
+from typing import Any, Callable, NewType, Tuple, Dict, Set, List
 
-from lxml.html import fromstring, etree
+from lxml.html import fromstring, tostring, etree
 import requests as rqs
 
-from .qio import QueueProcessor
+from .qio import QueueProcessor, PoolThrottle
+
+
+URL = NewType('URL', str)
 
 
 class HTMLCutter:
     '''
-    cuts up an html document to extract desired information
+    Extracts useful information from html documents.
 
-    this is done by implementing a rudimentary "mini-language"
-    consisting of opcodes and arguments to such opcodes to sequentially
-    process a list of entities, starting with the singleton list
-    consisting of the HTML document parsed with `lxml.html.fromstring'
+    After instantiation, the operations to be performed on the html string
+    are specified by chaining the methods of this class. These operations
+    are then performed in order on the argument of `cut` each time `cut` is
+    called.
 
-    see `HTMLCutter.init` for documentation on opcodes
+    The opcode methods available are listed below.
 
+    Opcodes:
+        fun: an arbitrary callable which will be applied to every element of
+            state. Should return the next value of state.
+        meth: a method name, which will be invoked on each element of state.
+        xp:
+            the state should be a list of `Etree` elements.
+            the `oparg` takes a valid XPath. concatenates the
+            return lists of `Etree.xpath` for each `Etree` element
+            in the current state, unless the XPath selects for a
+            property, in which case state becomes a list of unicode
+            strings.
+
+            care should be taken when passing absolute ("//") paths
+            because these are NOT implicitly made relative.
+        strip:
+            input state should be a list of `Etree` elements.
+            applies `etree.strip_tags`, which removes the selected tag
+            and flattens its content into its context. `oparg` should be a
+            string corresponding to a tag.
+        prune:
+            input state should be a list of `Etree` elements.
+            Applies `etree.strip_elements`, which deletes entirely every
+            instance of tag and its subtree. `oparg` should be a string
+            corresponding to the tag to prune.
+        text:
+            the state should be a list of `Etree` elements. extracts
+            the `.text` of each of these. ignores the `oparg`.
+        raw:
+            takes `Etree` as argument and returns its string representation.
+        re:
+            the state should be unicode strings. applies the regexp
+            given in the `oparg` to each. if it has two or more
+            capturing groups, the state becomes a list of tuples of
+            strings, else the state remains a list of unicode strings.
+        sel:
+            the state should be a list of tuples of strings. the
+            `oparg` is an integer. the state becomes a list of unicode
+            strings, each selected from index `oparg` from the tuple
+            at its index in the input state list.
     '''
-    # TODO: constants rather than magic strings
-    XPATH = 'xpath'
-    STRIP = 'strip'
-    TEXT = 'text'
-    REGEX = 'regex'
-    SELECT = 'select'
 
-    _XPATH_T = 'xpath_t'
-    _XPATH_P = 'xpath_p'
-    _REGEX_1G = 'regex_1g'
-    _REGEX_NG = 'regex_ng'
+    class CutterOpError(Exception):
+        pass  # noqa
 
-    _ops = set([XPATH, STRIP, TEXT, REGEX, SELECT])
+    def __init__(self):
+        self.opseq = []  # type: List[Callable[..., Any]]
 
-    T_ETREE = 'etree'
-    T_UNICODE = 'unicode'
-    T_TUP_UNICODE = 'tup_unicode'
+    def fn(self, func: Callable):
+        self.opseq.append(func)
+        return self
 
-    # TODO: constants rather than magic strings
-    _sigs = {_XPATH_T: (T_ETREE, T_ETREE),
-             _XPATH_P: (T_ETREE, T_UNICODE),
-             STRIP: (T_ETREE, T_ETREE),
-             TEXT: (T_ETREE, T_UNICODE),
-             _REGEX_1G: (T_UNICODE, T_UNICODE),
-             _REGEX_NG: (T_UNICODE, T_TUP_UNICODE),
-             SELECT: (T_TUP_UNICODE, T_UNICODE)}
+    def meth(self, methname: str):
+        self.opseq.append(lambda s: getattr(s, methname)())
+        return self
 
-    def __init__(self, opseq):
-        '''
-        Arguments:
-            opseq:
-                list of sequentially-compatible opcodes. rudimentary
-                validation is done to make sure each opcode can
-                process the output of the previous, and that opcode
-                arguments are valid.
+    def prune(self, tag: str):
+        self.opseq.append(lambda s: etree.strip_elements(s, tag) or s)
+        return self
 
-                an opcode consists of a constant, given as all-caps
-                class members, and an argument whose type depends on
-                the opcode. the argument will be referred to as the
-                `oparg`.
+    def raw(self):
+        self.opseq.append(lambda s: tostring(s, encoding='unicode'))
+        return self
 
-        Opcodes:
-            HTMLCutter.XPATH:
-                the state should be a list of `Etree` elements.
-                the `oparg` takes a valid XPath. concatenates the
-                return lists of `Etree.xpath` for each `Etree` element
-                in the current state, unless the XPath selects for a 
-                property, in which case state becomes a list of unicode
-                strings.
+    def re(self, regexp: str):
+        rx = re.compile(regexp)
+        self.opseq.append(lambda s: rx.findall(s))
+        return self
 
-                care should be taken when passing absolute ("//") paths
-                because these are NOT implicitly made relative.
-            HTMLCutter.STRIP:
-                input state should be a list of `Etree` elements.
-                applies `etree.strip_tags`. `oparg` should be a string
-                corresponding to a tag.
-            HTMLCutter.TEXT:
-                the state should be a list of `Etree` elements. extracts
-                the `.text` of each of these. ignores the `oparg`.
-            HTMLCutter.REGEX:
-                the state should be unicode strings. applies the regexp
-                given in the `oparg` to each. if it has two or more
-                capturing groups, the state becomes a list of tuples of
-                strings, else the state remains a list of unicode strings.
-            HTMLCutter.SELECT:
-                the state should be a list of tuples of strings. the
-                `oparg` is an integer. the state becomes a list of unicode
-                strings, each selected from index `oparg` from the tuple
-                at its index in the input state list.
-        '''
-        self.opseq = opseq
-        self._validate_opseq()
+    def sel(self, ix: int):
+        self.opseq.append(lambda s: s[ix])
+        return self
 
-    def _validate_opseq(self):
-        # check ops are valid
-        cur_type = self.T_ETREE
-        for opx, (op, arg) in enumerate(self.opseq):
-            if op not in self._ops:
-                raise ValueError('invalid op {} detected in opseq'.format(op))
+    def strip(self, tag: str):
+        self.opseq.append(lambda s: etree.strip_tags(s, tag) or s)
+        return self
 
-            sig_op = op
-            # polymorphism expansion
-            if op == self.REGEX:
-                arg = re.compile(arg)
-                if arg.groups > 1:
-                    sig_op = self._REGEX_NG
-                else:
-                    sig_op = self._REGEX_1G
-                self.opseq[opx] = (op, re.compile(arg))
+    def text(self):
+        self.opseq.append(lambda s: s.text)
+        return self
 
-            elif op == self.XPATH:
-                # TODO: fragile
-                if arg.split('/')[-1].startswith('@'):
-                    sig_op = self._XPATH_P
-                else:
-                    sig_op = self._XPATH_T
+    def xp(self, xpath_spec: str):
+        # test the spec
+        fromstring('<html></html>').xpath(xpath_spec)
+        self.opseq.append(lambda s: s.xpath(xpath_spec))
+        return self
 
-                test_x = fromstring('<html></html>')
-                test_x.xpath(arg)
-
-            elif op == self.SELECT:
-                assert isinstance(arg, int)
-
-            expect_type = self._sigs[sig_op][0]
-            if cur_type != expect_type:
-                raise TypeError('op {} acts on wrong type {}'
-                                .format(op, expect_type))
-            else:
-                cur_type = self._sigs[sig_op][1]
-
-    # TODO: preemptive opseq validation
-    def cut(self, s):
-        '''
-        applies the opseq this instance was instantiated with to doc
-
-        Arguments:
-            s:
-                html document, as string
-
-        Returns:
-            state:
-                list of strings or `etree` nodes, determined by the
-                `opseq`
-        '''
-        x = fromstring(s)
-        state = [x]
-        for op, arg in self.opseq:
-            if op == self.XPATH:
-                state = sum([s.xpath(arg) for s in state], [])
-            elif op == self.STRIP:
-                for s in state:
-                    etree.strip_tags(s, arg)
-            elif op == self.TEXT:
-                state = [s.text for s in state]
-            elif op == self.REGEX:
-                state = sum([arg.findall(s)
-                             for s in state
-                             if s is not None], [])
-            elif op == self.SELECT:
-                state = [s[arg] for s in state]
-            else:
-                raise ValueError('invalid op {}'.format(op))
-
+    def cut(self, html_str):
+        state = [fromstring(html_str)]
+        for opx, op in enumerate(self.opseq):
+            if not state:
+                return state
+            try:
+                state = [op(s) for s in state]
+                state = [s for s in state if s is not None]
+                if isinstance(state[0], list):
+                    state = sum(state, [])
+            except Exception:
+                print(
+                    f'invalid op {op} on state {state}, index {opx}',
+                    file=sys.stderr,
+                )
+                raise
         return state
+
+
+class CrawlSpec:
+    '''
+    Class managing cutters to run on a per-url basis.
+    '''
+
+    def __init__(self):
+        self.filter_bank =\
+            defaultdict(dict)  # type: Dict[Any, Dict[str, HTMLCutter]]
+
+    def add(self, urx: str, cutter_dict: Dict[str, HTMLCutter]) -> None:
+        urx_re = re.compile(urx)
+        self.filter_bank[urx_re].update(cutter_dict)
+        return self
+
+    def cut(self, url, html_str):
+        output = {}
+        for regexp, cutter_dict in self.filter_bank.items():
+            if regexp.findall(url):
+                output.update({
+                    key: cutter.cut(html_str)
+                    for key, cutter in cutter_dict.items()
+                })
+        return output
 
 
 class WebScraper:
 
-    def __init__(self, seed_url, callbacks, crawled=None, **kwargs):
+    def __init__(
+        self, *,
+        seed_url: URL,
+        url_cutter: HTMLCutter,
+        crawl_spec: CrawlSpec,
+        crawled: Set[URL]=None,
+        requests_kwargs: Dict[str, Any]=None,
+        scraper_workers: int=8,
+        process_workers: int=2,
+        throttle_pool=5,
+        throttle_window=1,
+    ) -> None:
         '''
         Notation:
             URX:
@@ -218,30 +220,39 @@ class WebScraper:
                 internally to fetch the web pages.
         '''
 
-        self.urls_q = Queue()
-        self.urls_q.put(seed_url)
-
-        self.callbacks = callbacks
-
-        self._scr = QueueProcessor(
-            input_q=self.urls_q,
-            work_func=self._crawl,
-            output_q=self.output_q,
-            **kwargs
+        self.f_get = PoolThrottle(pool=throttle_pool, window=throttle_window)(
+            partial(rqs.get, **(requests_kwargs or {}))
         )
 
+        self.url_cutter = url_cutter
+        self.crawl_spec = crawl_spec
+
+        self.urls_q = Queue()  # type: Queue[URL]
+        self.html_q = Queue()  # type: Queue[str]
+        self.urls_q.put(seed_url)
+
+        self._scrape_qp = QueueProcessor(
+            input_q=self.urls_q,
+            work_func=self._scrape,
+            n_workers=scraper_workers,
+        )
+
+        self._dissect_qp = QueueProcessor(
+            input_q=self._scrape_qp.output_q,
+            work_func=self._dissect,
+            n_workers=process_workers,
+            output_limit=50,
+        )
+
+        self.output_q = self._dissect_qp.output_q
+
         if crawled is None:
-            self.crawled = set()
+            self.crawled = set()  # type: Set[URL]
         else:
             self.crawled = crawled
 
+        self.crawled_lock = Lock()
         self.crawled.add(seed_url)
-        self._crl_lock = Lock()
-
-        patterns = sorted(self.rig.keys(), key=lambda x: -len(x.pattern))
-        self._main_re = re.compile('(' +
-                                   '|'.join([x.pattern for x in patterns]) +
-                                   ')')
 
     def run(self):
         '''
@@ -249,21 +260,23 @@ class WebScraper:
 
         no requests are sent before this method is called
         '''
-        self._scr.run()
+        self._scrape_qp.run()
+        self._dissect_qp.run()
 
-    def _add_urls(self, urls, cutter_dict):
-        with self._crl_lock:
+    def _scrape(self, url: URL):
+        return (url, self.f_get(url).text)
+
+    def _dissect(self, scrapeload: Tuple[URL, str]):
+        url, html_str = scrapeload
+        # print(f'called _scrape with html_str {html_str}')
+        urls = self.url_cutter.cut(html_str)
+        with self.crawled_lock:
+            urls = {url for url in urls if url not in self.crawled}
             for url in urls:
-                if url not in self.crawled:
-                    self.crawled.add(url)
-                    self.urls_q.put(url)
+                self.crawled.add(url)
+                self.urls_q.put(url)
 
-    def _crawl(self, url):
-        html = rqs.get(url).text
-        for urx in sorted(self.rig.keys(), key=lambda x: -len(x.pattern)):
-            self._add_urls(urx.findall(html), self.rig[urx])
-
-        cutter_dict = self._get_cutter(url)
-        if cutter_dict:
-            out = {k: v.cut(html) for k, v in cutter_dict.items()}
-            return (url, out)
+        out = self.crawl_spec.cut(url, html_str)
+        if out:
+            out['url'] = url
+        return out

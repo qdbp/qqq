@@ -151,6 +151,13 @@ def gen_random_labels(X, n_classes, pvec=None):
     return npr.multinomial(1, pvec, size=num)
 
 
+def get_dict_data_len(x_dict):
+    '''
+    Get the number of samples of data packed into a keras_style dictionary.
+    '''
+    return check_all_same_length(*x_dict.values())
+
+
 def dict_tv_split(*ds, f_train=0.85, shuffle=True, seed=None):
     vals = []
     for d in ds:
@@ -340,8 +347,7 @@ def batch_transformer( # noqa
             if in_keys is None:
                 # by default, apply transformations to all inputs and no labels
                 in_keys = [*xbd.keys()]
-            if out_keys is None:
-                out_keys = out_keys or in_keys
+            out_keys = out_keys or in_keys
             if in_in_ys is None:
                 in_in_ys = []
                 for in_key in in_keys:

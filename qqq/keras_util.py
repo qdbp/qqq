@@ -39,15 +39,32 @@ JSON_EXT = 'json'
 PNG_EXT = 'png'
 
 
-def apply_layers(inp, *stacks, td=False):
+# LOSSES AND METRICS
+def f2_crossentropy(yt, yp):
+    '''
+    Biased binary crossentropy, favouring recall.
+    '''
+    yp = K.clip(yp, K.epsilon(), 1 - K.epsilon())
+    return K.mean(-(2 * yt * K.log(yp) + (1 - yt) * K.log(1 - yp)))
 
+
+# MODEL CONSTRUCTION
+def apply_layers(inp, *stacks, td=False):
+    '''
+    Applies the Keras layers in the list of stacks sequentially to the input.
+
+    If `td` is True, applies one layer of TimeDistributed to each layer.
+    If `td` is an integer, applies `td` levels of TimeDistributed to each
+    layer.
+    '''
+
+    td = int(td)
     y = inp
     for stack in stacks:
         for layer in stack:
-            if td:
-                y = kr.TimeDistributed(layer)(y)
-            else:
-                y = layer(y)
+            for i in range(td):
+                layer = kr.TimeDistributed(layer)
+            y = layer(y)
     return y
 
 
@@ -55,18 +72,24 @@ def shuffle_weights(weights):
     return [npr.permutation(w.flat).reshape(w.shape) for w in weights]
 
 
-def get_callbacks(name, *, pat_stop=9, pat_lr=4, plot=True, val=True):
+def get_callbacks(
+        name, *, pat_stop=9, pat_lr=3, plot=True, val=True,
+        epochs=50, base_lr=0.001):
     '''
     Returns some sensible default callbacks for Keras model training.
     '''
     monitor = 'val_loss' if val else 'loss'
     out = [
-        kcb.ModelCheckpoint(f'./weights/{name}.hdf5', save_best_only=val),
+        kcb.ModelCheckpoint(
+            f'./weights/{name}.hdf5', save_best_only=True, monitor=monitor),
         ValLossPP(),
         KQLogger(name),
-        kcb.ReduceLROnPlateau(patience=pat_lr, factor=0.2, monitor=monitor),
+        # kcb.ReduceLROnPlateau(
+        #     patience=pat_lr, factor=1/np.e, monitor=monitor),
+        # linear lr schedule
+        kcb.LearningRateScheduler(
+            lambda epoch:  base_lr * (1 - epoch / epochs)),
         kcb.EarlyStopping(patience=pat_stop, monitor=monitor),
-        # HypergradientScheduler(),
     ]
 
     if plot:
