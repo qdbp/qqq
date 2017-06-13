@@ -11,7 +11,7 @@ def softmax(x):
 
 
 def relu(x):
-    return np.minimum(x, 0)
+    return np.maximum(x, 0)
 
 
 def decay(k, x, x0):
@@ -118,6 +118,8 @@ def hilbert_ixes(width):
     '''
     Generates a mapping between the plane and the line.
 
+    Assumes width is a power of 2.
+
     Returns:
         arr: ndarray such that arr[x, y] = hilbert_ix(x, y)
     '''
@@ -138,7 +140,3 @@ def hilbert_ixes(width):
         l = len(proto)
 
     return arr
-
-
-if __name__ == '__main__':
-    import numpy as np

@@ -20,20 +20,19 @@ Classes:
         would extract a list of all Capitalized words contained inside
         <p class="main-text"> tags, including text wrapped in <a> tags.
 '''
-from collections import defaultdict
-from enum import Enum, auto
-from functools import partial
-from queue import Queue
 import re
 import sys
+from collections import defaultdict, Iterable
+from functools import partial
+from queue import Queue, PriorityQueue
 from threading import Lock
-from typing import Any, Callable, NewType, Tuple, Dict, Set, List
+from typing import (
+    Any, Callable, Dict, Iterator, List, NewType, Set, Tuple, Union)
 
-from lxml.html import fromstring, tostring, etree
 import requests as rqs
+from lxml.html import etree, fromstring, tostring
 
-from .qio import QueueProcessor, PoolThrottle
-
+from .qio import PoolThrottle, QueueProcessor
 
 URL = NewType('URL', str)
 
@@ -93,8 +92,9 @@ class HTMLCutter:
     class CutterOpError(Exception):
         pass  # noqa
 
-    def __init__(self):
+    def __init__(self, init_state: Callable[[str], List[Any]]=None) -> None:
         self.opseq = []  # type: List[Callable[..., Any]]
+        self.init_state = init_state or (lambda s: [fromstring(s)])
 
     def fn(self, func: Callable):
         self.opseq.append(func)
@@ -108,8 +108,8 @@ class HTMLCutter:
         self.opseq.append(lambda s: etree.strip_elements(s, tag) or s)
         return self
 
-    def raw(self):
-        self.opseq.append(lambda s: tostring(s, encoding='unicode'))
+    def raw(self, **kwargs):
+        self.opseq.append(lambda s: tostring(s, encoding='unicode', **kwargs))
         return self
 
     def re(self, regexp: str):
@@ -135,8 +135,8 @@ class HTMLCutter:
         self.opseq.append(lambda s: s.xpath(xpath_spec))
         return self
 
-    def cut(self, html_str):
-        state = [fromstring(html_str)]
+    def cut(self, html_str: str) -> List[Any]:
+        state = self.init_state(html_str)
         for opx, op in enumerate(self.opseq):
             if not state:
                 return state
@@ -151,7 +151,11 @@ class HTMLCutter:
                     file=sys.stderr,
                 )
                 raise
+
         return state
+
+    def __add__(self, hc: 'HTMLCutter') -> 'HTMLCutter':
+        return HTMLCutter(init_state=lambda s: self.cut(s) + hc.cut(s))
 
 
 class CrawlSpec:
@@ -163,7 +167,7 @@ class CrawlSpec:
         self.filter_bank =\
             defaultdict(dict)  # type: Dict[Any, Dict[str, HTMLCutter]]
 
-    def add(self, urx: str, cutter_dict: Dict[str, HTMLCutter]) -> None:
+    def add(self, urx: str, cutter_dict: Dict[str, HTMLCutter]) -> 'CrawlSpec':
         urx_re = re.compile(urx)
         self.filter_bank[urx_re].update(cutter_dict)
         return self
@@ -183,15 +187,20 @@ class WebScraper:
 
     def __init__(
         self, *,
-        seed_url: URL,
-        url_cutter: HTMLCutter,
-        crawl_spec: CrawlSpec,
+        seed_generator: Iterator[URL],
+        payload_callback: Callable[[Url, str], None],
+        url_callback: Callable[[URL, str], Iterable[URL]]=None,
         crawled: Set[URL]=None,
         requests_kwargs: Dict[str, Any]=None,
         scraper_workers: int=8,
         process_workers: int=2,
-        throttle_pool=5,
-        throttle_window=1,
+        throttle_pool=1,
+        throttle_window=0.2,
+        referer='https://www.google.com',
+        user_agent=(
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+            'AppleWebKit/537.36 (KHTML, like Gecko) '
+            'Chrome/58.0.3029.110 Safari/537.36'),
     ) -> None:
         '''
         Notation:
@@ -201,17 +210,6 @@ class WebScraper:
         Arguments:
             seed_url:
                 url from which crawling begins
-            callbacks:
-                a dictionary, keyed by URXs. each new URL will be matched to
-                the most specific, as determined by pattern length, URX which
-                matches it. the callback keyed by this URX will then be called
-                on the HTML content fetched from the URL, provided it can be
-                retrieved successfully.
-
-                the keys of this dictionary determine which new URLs will
-                be followed. keys mapping to `None` can be used to match URLs
-                which should be followed, but whose content will be ignored
-                except for finding further URLs.
             crawled:
                 set of URLs to be considered already visited. any URL contained
                 in it will not be scraped.
@@ -221,20 +219,42 @@ class WebScraper:
         '''
 
         self.f_get = PoolThrottle(pool=throttle_pool, window=throttle_window)(
-            partial(rqs.get, **(requests_kwargs or {}))
+            partial(
+                rqs.get, headers={
+                    'referer': referer,
+                    'user-agent': user_agent,
+                },
+                **(requests_kwargs or {}),
+            )
         )
 
-        self.url_cutter = url_cutter
-        self.crawl_spec = crawl_spec
+        self.url_callback = url_callback
+        self.payload_callback = payload_callback
 
-        self.urls_q = Queue()  # type: Queue[URL]
+        self.urls_q = PriorityQueue()  # type: PriorityQueue
         self.html_q = Queue()  # type: Queue[str]
-        self.urls_q.put(seed_url)
+
+        if crawled is None:
+            self.crawled = set()  # type: Set[URL]
+        else:
+            self.crawled = crawled
+
+        self.crawled_lock = Lock()
+
+        if not isinstance(seed_url, Iterable):
+            # seed urls get lower priority than crawled urls
+            self.urls_q.put((1, seed_url))
+            self.crawled.add(seed_url)
+        else:
+            for url in seed_url:
+                self.urls_q.put((1, url))  # type: ignore
+                self.crawled.add(url)  # type: ignore
 
         self._scrape_qp = QueueProcessor(
             input_q=self.urls_q,
             work_func=self._scrape,
             n_workers=scraper_workers,
+            unpack=True, prio=True,
         )
 
         self._dissect_qp = QueueProcessor(
@@ -246,14 +266,6 @@ class WebScraper:
 
         self.output_q = self._dissect_qp.output_q
 
-        if crawled is None:
-            self.crawled = set()  # type: Set[URL]
-        else:
-            self.crawled = crawled
-
-        self.crawled_lock = Lock()
-        self.crawled.add(seed_url)
-
     def run(self):
         '''
         initiates the scraper.
@@ -263,20 +275,71 @@ class WebScraper:
         self._scrape_qp.run()
         self._dissect_qp.run()
 
-    def _scrape(self, url: URL):
-        return (url, self.f_get(url).text)
+    def _scrape(self, prio: int, url: URL):
+        resp = self.f_get(url)
+        return (url, resp.text)
 
     def _dissect(self, scrapeload: Tuple[URL, str]):
         url, html_str = scrapeload
         # print(f'called _scrape with html_str {html_str}')
-        urls = self.url_cutter.cut(html_str)
-        with self.crawled_lock:
-            urls = {url for url in urls if url not in self.crawled}
-            for url in urls:
-                self.crawled.add(url)
-                self.urls_q.put(url)
+        if self.url_callback is not None:
+            urls = self.url_callback(url, html_str)
+            with self.crawled_lock:
+                for url in urls:
+                    if url not in self.crawled:
+                        self.crawled.add(url)
+                        self.urls_q.put((0, url))
 
-        out = self.crawl_spec.cut(url, html_str)
-        if out:
-            out['url'] = url
-        return out
+        return self.payload_callback(url, html_str)
+
+
+class HTMLScraper(WebScraper):
+    '''
+    Crawls HTML websites.
+    '''
+
+    def __init__(
+        self, *,
+        seed_url: Union[URL, Iterator[URL]],
+        crawl_spec: CrawlSpec,
+        url_cutter: HTMLCutter=None,
+    ) -> None:
+        '''
+        Notation:
+            URX:
+                "URL regular expression", a regular expression matching certain
+                crawlable URLs.
+        Arguments:
+            seed_url:
+                url from which crawling begins
+            crawled:
+                set of URLs to be considered already visited. any URL contained
+                in it will not be scraped.
+            kwargs:
+                keyword arguments to pass to the `qio.Scraper` instance used
+                internally to fetch the web pages.
+        '''
+
+        if not isinstance(seed_url, Iterator):
+            seed_url = iter([seed_url])
+
+        def url_callback(url, html_str):
+            return url_cutter.cut(html_str)
+
+        def payload_callback(url, html_str):
+            return crawl_spec.cut(url, html_str)
+
+        super().__init__(
+            seed_generator=seed_url,
+            url_callback=url_callback,
+            payload_callback=payload_callback,
+            **kwargs,
+        )
+
+
+class JSONScraper(WebScraper):
+    '''
+    Crawls a json API.
+    '''
+
+    def __init__(self, *, keys, **kwargs):

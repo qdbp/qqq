@@ -311,16 +311,21 @@ class QueueProcessor(HaltMixin):
     '''
 
     def __init__(self, *, input_q, work_func, n_workers, output_q=None,
-                 unpack=False, input_limit=0, output_limit=0,
+                 unpack=False, input_limit=0, output_limit=0, prio=False,
                  discard=False, **kwargs):
         '''
         Arguments:
             input_limit (int): limit argument for the expander.
+            prio (bool): use a priority queue on the input.
         '''
 
         super().__init__(**kwargs)
 
-        self.input_q = ensure_type(input_q, Queue)
+        if not prio:
+            self.input_q = ensure_type(input_q, Queue)
+        else:
+            self.input_q = ensure_type(input_q, PriorityQueue)
+
         self.output_q = ensure_type(output_q, Queue, maxsize=output_limit)
 
         self.expander = QueueExpander(
