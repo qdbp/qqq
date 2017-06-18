@@ -1,3 +1,4 @@
+from collections.abc import Mapping, Sequence
 from functools import wraps
 from inspect import signature, Parameter
 import os.path as osp
@@ -27,7 +28,7 @@ def ensure_list(obj, *, allow_none=False):
         return obj
 
 
-def kws(f):
+def sift_kwargs(f):
     '''
     Lets the wrapped function silently ignore invalid kwargs.
     '''
@@ -93,36 +94,101 @@ def pickled(fn, func, *args, **kwargs):
             pickle.dump(out, f)
     return out
 
+class UQLError(Exception): pass  # noqa
+
+
+def uql(d, k, default=None):
+    '''
+    Micro-Query Language.
+
+    Dissect nested dicts. Dismember JSON without mercy.
+
+    Valid keys for a given subcontainer which are not found
+    in that subcontainer trigger the default return. On the other hand,
+    invalid keys or attempting to index non-containers raises a
+    UQLError.
+
+    >>> d = {'a': {'1': 'foo', '2': ['bar', 'baz']}}
+    >>> uql(d, 'a.2.1')
+    "bar"
+    >>> uql(d, 'a.1.b')
+    InvalidPathError
+    >>> uql(d, 'a.2.3', 'qux')
+    "qux"
+    '''
+
+    key, _, rest = k.partition('.')
+
+    if isinstance(d, Mapping):
+        if key in d:
+            if not rest:
+                return d[key]
+            else:
+                return uql(d[key], rest, default=default)
+        else:
+            try:
+                if int(key) in d:
+                    if not rest:
+                        return d[key]
+                    else:
+                        uql(d[key], rest, default=default)
+            except ValueError:
+                return default
+
+    elif isinstance(d, Sequence):
+        try:
+            ix = int(key)
+        except ValueError:
+            raise UQLError(
+                f'bad subkey {key} for subcontainer {d}'
+            )
+        if not rest:
+            try:
+                return d[ix]
+            except IndexError:
+                return default
+        else:
+            return uql(d[ix], rest, default=default)
+
+    else:
+        raise UQLError(
+            f'attempt to get key {key} from terminal value {d}'
+        )
+
+
+class LockedRef:
+
+    def __init__(self, obj, lock):
+        self.obj = obj
+        self.lock = lock
+
+    def __del__(self):
+        self.lock.release()
+
+    def __getattr__(self, key):
+        return getattr(self.obj, key)
+
 
 class Sync:
     '''
-    class to transparently syncrhonize access to an object
+    Class to transparently syncrhonize access to an object.
 
-    any `method` call an object wrapped in this class is equivalent to
-
-    >>> with obj_lock:
-    >>>     obj.method()
-
-    this does not work for __dunder__ methods
+    Uses the descriptor protocol to return an exclusive reference wrapper
+    which blocks attribute lookup until it is destroyed.
     '''
+
     def __init__(self, obj):
         self.obj = obj
         self._lock = Lock()
-        self._memo_table = {}
 
-    def __getattr__(self, name):
-        m = getattr(self.obj, name)
-        if hasattr(m, '__call__'):
-            try:
-                return self._memo_table[name]
-            except KeyError:
-                def wrapped_call(*args, **kwargs):
-                    with self._lock:
-                        return m.__call__(*args, **kwargs)
-                self._memo_table[name] = wrapped_call
-                return wrapped_call
-        else:
-            return m
+    def __get__(self, obj, cls):
+        self._lock.acquire()
+
+        return LockedRef(self.obj, self._lock)
+
+    def __set__(self, obj, val):
+        with self._lock():
+            self.obj = val
 
 
 class Timer():
