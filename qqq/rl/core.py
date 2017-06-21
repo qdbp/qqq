@@ -200,14 +200,11 @@ class RolloutMixin(RLSolver[A, B, P, S], Generic[A, B, P, S]):
 
         reward = 0.
         for t in range(max_length):
+
             obs = self.env.observe()
             action = actor.act(obs, policy)
-
             r_t, alive = self.env.step(action)
 
-            # r_t, alive = self.env.step(
-            #     actor.act(self.env.observe(), policy)
-            # )
             reward += r_t
 
             if draw:
@@ -241,6 +238,7 @@ class GradientFreeSolver(RolloutMixin[A, B, P, S], Generic[A, B, DP, P, S]):
             epochs=100,
             n_base_rollouts=50,
             n_rollouts=250,
+            rollout_length=100,
             **kw) -> P:
         '''
         Trains the policy.
@@ -254,7 +252,9 @@ class GradientFreeSolver(RolloutMixin[A, B, P, S], Generic[A, B, DP, P, S]):
 
             r0 = 0.
             for i in range(n_base_rollouts):
-                r0 += self.rollout(policy, actor, **kw) / n_base_rollouts
+                r0 += self.rollout(
+                    policy, actor, max_length=rollout_length, **kw
+                ) / n_base_rollouts
 
             rewards = []  # type: List[float]
             deltas = []  # type: List[DP]
@@ -262,12 +262,14 @@ class GradientFreeSolver(RolloutMixin[A, B, P, S], Generic[A, B, DP, P, S]):
             for rix in range(n_rollouts):
                 dp = self.get_perturbations(policy)
                 p_rollout = self.apply_perturbation(policy, dp)
-                rewards.append(self.rollout(p_rollout, actor))
+                rewards.append(
+                    self.rollout(
+                        p_rollout, actor, max_length=rollout_length, **kw
+                    )
+                )
                 deltas.append(dp)
 
-            new_policy = self.update(
-                r0, policy, deltas, rewards
-            )
+            new_policy = self.update(r0, policy, deltas, rewards)
 
             av_rs.append(np.mean(rewards))
             if not (e % 25):

@@ -28,7 +28,7 @@ class HotCash(RLEnv[np.ndarray, np.ndarray, np.ndarray]):
     def sample_action(self):
         return np.zeros((4,))
 
-    def _fit(self, size=10, money_rate=0.05, lava_rate=0.002, obs_size=3):
+    def _fit(self, size=10, money_rate=0.2, lava_rate=0.05, obs_size=3):
         self.size_ = size
         self.money_rate_ = money_rate
         self.lava_rate_ = lava_rate
@@ -56,12 +56,13 @@ class HotCash(RLEnv[np.ndarray, np.ndarray, np.ndarray]):
             self._do_spawn()
 
     def _observe(self) -> np.ndarray:
-        self._obs[:, :] =\
-            self._state[self._x - 1:self._x + 2, self._y - 1:self._y + 2]
+        out =\
+            np.minimum(
+                self._state[self._x - 1:self._x + 2, self._y - 1:self._y + 2],
+                1
+            ).view()
 
-        out = self._obs.view()
         out.flags['WRITEABLE'] = False
-
         return out
 
     def _random_xy(self):
@@ -96,7 +97,7 @@ class HotCash(RLEnv[np.ndarray, np.ndarray, np.ndarray]):
     def _money_check(self) -> Tuple[float, bool]:
         pos_vec = self._state[self._x, self._y]
         if pos_vec[self.LAVA_PLANE] > 0:
-            return (0, False)
+            return (-1, False)
         else:
             # money value is not proportional to how long it has left
             return (float(pos_vec[self.MONEY_PLANE] > 0), True)

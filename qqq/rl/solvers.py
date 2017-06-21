@@ -49,39 +49,82 @@ P_Arrs = NewType('P_Arrs', List[np.ndarray])
 DP_Arrs = NewType('DP_Arrs', List[np.ndarray])
 
 
-class GFDSolver(GradientFreeSolver[A, B, DP_Arrs, P_Arrs, S]):
+class ESSolver(GradientFreeSolver[A, B, DP_Arrs, P_Arrs, S]):
     '''
-    A primitive finite differences solver using a gaussian perturbation.
+    A basic single-threaded Evolution Strategies solver.
+
+    Salimans, Tim, et al. "Evolution strategies as a scalable
+    alternative to reinforcement learning." arXiv preprint arXiv:1703.03864
+    (2017).
+
+    Implements antithetic sampling and a rank transformation.
     '''
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(self, *args, **kwargs)
+        self._antithetic = False
 
     def fit(self, *, sigma=0.05, decay=0.01, **kwargs):
         super().fit(**kwargs)
         self.sigma_ = sigma
         self.decay_ = decay
 
+    def _rank_transform(self, rewards: List[float]):
+        return np.linspace(-len(rewards), len(rewards)) / len(rewards)
+
     def get_perturbations(self, policy: P_Arrs) -> DP_Arrs:
-        # XXX memallo optimize
-        return [npr.normal(0, self.sigma_, size=p.shape) for p in policy]  # type: ignore  # noqa
+        # XXX memalloc optimize
+        if not self._antithetic:
+            self._perturbation = [
+                npr.normal(0, self.sigma_, size=p.shape) for p in policy
+            ]
+            self._antithetic = True
+            return self._perturbation
+        else:
+            self._antithetic = False
+            return [-pert for pert in self._perturbation]
 
     def apply_perturbation(self, policy: P_Arrs, delta: DP_Arrs) -> P_Arrs:
         return [p_arr + dp_arr for p_arr, dp_arr in zip(policy, delta)]  # type: ignore  # noqa
 
-    def update(self, r0, policy, rollout_deltas, rewards):
+    def update(self, policy, rollout_deltas, rewards) -> P_Arrs:
 
-        drs = np.array(rewards) - r0
+        drs = self._rank_transform(np.array(rewards))
         grad = []  # List[np.ndarray]
 
         for d_component in zip(*rollout_deltas):
             d_arr = np.stack([np.ravel(x) for x in d_component])
 
             g = self.lr_ * nlg.inv(d_arr.T @ d_arr) @ d_arr.T @ drs
-            # print(g)
             grad.append(g)
 
-        return [
-            p + g.reshape(p.shape) - self.decay_ * p
+        return [  # type: ignore
+            p + g.reshape(p.shape) - p * self.decay_
             for p, g in zip(policy, grad)
         ]
+
+    def train(self, *args, **kwargs):
+        return super().train(*args, n_base_rollouts=0, **kwargs)
+
+
+class ESSolver(GradientFreeSolver[A, B, DP_Arrs, P_Arrs, S]):
+    '''
+    Evolution strategies solver.
+
+    Following
+
+    '''
+
+    def __init__(self):
+        pass
+
+    def get_perturbations(self, policy: P_Arrs) -> DP_Arrs:
+        pass
+
+    def apply_perturbation(self, delta: DP_Arrs, policy: P_Arrs) -> P_Arrs:
+        pass
+
+    def update(
 
 
 if __name__ == '__main__':
@@ -89,12 +132,19 @@ if __name__ == '__main__':
     from qqq.rl.actors import LinearActor
 
     env = HotCash(money_rate=0.5)
-    actor = LinearActor()
+    actor = LinearActor(sample=False)
     policy = actor.init_policy(env.observe().size, env.sample_action.size)
-    solver = GFDSolver(env, sigma=0.1, lr=0.01)
+    solver = GFDSolver(env, sigma=1., lr=0.001)
 
-    for i in range(100):
-        policy = solver.train(policy, actor, epochs=100, n_base_rollouts=10, n_rollouts=100)
-        print(policy[0].reshape((3, 3, 3, 4))[:, :, 0, 0])
+    for i in range(10):
+        policy = solver.train(
+            policy,
+            actor,
+            epochs=200,
+            n_base_rollouts=10,
+            n_rollouts=50,
+            rollout_length=10,
+        )
+
+        print(policy[0].reshape((3, 3, 3, 4))[:, :, 2, 0])
         solver.rollout(policy, actor, draw=True)
-
