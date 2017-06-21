@@ -1,16 +1,16 @@
 # import pyximport; pyximport.install()  # noqa
 # from .qiox import flif_to_rgba_arr  # noqa
 
-from abc import abstractmethod
-from itertools import cycle
-from random import choice, randrange
 import sched
 import time
-from inspect import isgeneratorfunction as isgenerator
+from abc import abstractmethod
 from functools import wraps
-from queue import Empty, Queue, PriorityQueue, Full
+from inspect import isgeneratorfunction as isgenerator
+from itertools import cycle
+from queue import Empty, Full, PriorityQueue, Queue
+from random import choice, randrange
 from threading import Event, Lock, Thread
-from typing import TypeVar, Iterable, List, Any
+from typing import Any, Iterable, List, TypeVar
 
 from .qlog import get_logger
 from .util import ensure_type

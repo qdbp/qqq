@@ -1,45 +1,49 @@
 '''
-module implementing classes to facilitate web scraping
-
-Classes:
-    HTMLCutter:
-        this class can be though of as implementing "regular expressions++" on
-        HTML documents. leveraging `re` and `lxml`, each instance carries a
-        sequential set of instructions on how to extract useful information
-        from an HTML document.
-
-        the use case targeted is large volumes of similar html pages, likely
-        to be encountered during web-scraping or crawling. an example:
-
-            >>> wc = HTMLCutter([(HTMLCutter.XPATH, '//p[@class="main-text"]'),
-            ...                  (HTMLCutter.STRIP, 'a'),
-            ...                  (HTMLCutter.TEXT, ''),
-            ...                  (HTMLCutter.REGEX, '[A-Z][a-z]+')]
-            >>> wc.cut(rqs.get('www.example.com').text)
-
-        would extract a list of all Capitalized words contained inside
-        <p class="main-text"> tags, including text wrapped in <a> tags.
+Module implementing classes to facilitate web scraping.
 '''
 import re
 import sys
-from collections import defaultdict, Iterable
+from collections import defaultdict
+from collections.abc import Collection  # type: ignore
 from functools import partial
-from queue import Queue, PriorityQueue
+from queue import PriorityQueue, Queue
 from threading import Lock
-from typing import (
-    Any, Callable, Dict, Iterator, List, NewType, Set, Tuple, Union)
+from typing import (Any, Callable, Dict, Generic, Iterable, List, NewType, Set,
+                    Tuple, TypeVar, Union)
 
 import requests as rqs
 from lxml.html import etree, fromstring, tostring
 
-from .qio import PoolThrottle, QueueProcessor
+from .io import PoolThrottle, QueueProcessor
 
 URL = NewType('URL', str)
+T = TypeVar('T')
 
 
 class HTMLCutter:
     '''
-    Extracts useful information from html documents.
+    Extracts useful information from HTML documents.
+
+    This class can be though of as implementing "regular expressions++" on
+    HTML documents. leveraging `re` and `lxml`, each instance carries a
+    sequential set of instructions on how to extract useful information
+    from an HTML document.
+
+    The use case targeted is large volumes of similar HTML pages, likely
+    to be encountered during web-scraping or crawling
+
+    Example:
+
+        >>> hc = HTMLCutter()\\
+        ...     .xp('//p[@class="main-text"]')\\
+        ...     .strip("a")\\
+        ...     .text()\\ 
+        ...     .re(r"[A-Z][a-z]+")
+        >>> hc.cut(rqs.get("www.example.com").text)
+
+        The above code extracts a list of all Capitalized words contained
+        inside <p class="main-text"> tags, including text wrapped in <a>
+        tags.
 
     After instantiation, the operations to be performed on the html string
     are specified by chaining the methods of this class. These operations
@@ -183,14 +187,14 @@ class CrawlSpec:
         return output
 
 
-class WebScraper:
+class WebScraper(Generic[T]):
 
     def __init__(
         self, *,
-        seed_generator: Iterator[URL],
-        payload_callback: Callable[[Url, str], None],
-        url_callback: Callable[[URL, str], Iterable[URL]]=None,
-        crawled: Set[URL]=None,
+        seed: Union[URL, Iterable[URL]],
+        payload_callback: Callable[[rqs.Request], T],
+        url_callback: Callable[[rqs.Request], Iterable[URL]]=None,
+        crawled: Collection[URL]=None,
         requests_kwargs: Dict[str, Any]=None,
         scraper_workers: int=8,
         process_workers: int=2,
@@ -202,20 +206,29 @@ class WebScraper:
             'AppleWebKit/537.36 (KHTML, like Gecko) '
             'Chrome/58.0.3029.110 Safari/537.36'),
     ) -> None:
+
         '''
         Notation:
             URX:
                 "URL regular expression", a regular expression matching certain
                 crawlable URLs.
+
         Arguments:
-            seed_url:
-                url from which crawling begins
+            seed_generator:
+                A finite iterator yielding a number of seed URLs from which to
+                begin crawling. These URLs will be given lowest priority,
+                so that a seed URL will only be scraped if no new URLs were
+                added as a result of crawling preceding seeds.
+            payload_callback:
+                A callable invoked on every Request, returning an arbitrary
+                output object, which will be collected in the `output_q`.
+            url_callback:
+                A callable invoked on every Request, returning an iterable
+                of URLs. These will be added to the crawling queue and
+                scraped in turn.
             crawled:
                 set of URLs to be considered already visited. any URL contained
                 in it will not be scraped.
-            kwargs:
-                keyword arguments to pass to the `qio.Scraper` instance used
-                internally to fetch the web pages.
         '''
 
         self.f_get = PoolThrottle(pool=throttle_pool, window=throttle_window)(
@@ -234,21 +247,14 @@ class WebScraper:
         self.urls_q = PriorityQueue()  # type: PriorityQueue
         self.html_q = Queue()  # type: Queue[str]
 
-        if crawled is None:
-            self.crawled = set()  # type: Set[URL]
-        else:
-            self.crawled = crawled
-
+        self.crawled = crawled or set()
         self.crawled_lock = Lock()
 
-        if not isinstance(seed_url, Iterable):
-            # seed urls get lower priority than crawled urls
-            self.urls_q.put((1, seed_url))
-            self.crawled.add(seed_url)
-        else:
-            for url in seed_url:
-                self.urls_q.put((1, url))  # type: ignore
-                self.crawled.add(url)  # type: ignore
+        if not isinstance(seed, Iterable):
+            seed = (seed,)
+        for url in seed:
+            self.urls_q.put((1, url))  # type: ignore
+            self.crawled.add(url)  # type: ignore
 
         self._scrape_qp = QueueProcessor(
             input_q=self.urls_q,
@@ -281,7 +287,7 @@ class WebScraper:
 
     def _dissect(self, scrapeload: Tuple[URL, str]):
         url, html_str = scrapeload
-        # print(f'called _scrape with html_str {html_str}')
+
         if self.url_callback is not None:
             urls = self.url_callback(url, html_str)
             with self.crawled_lock:
@@ -343,3 +349,4 @@ class JSONScraper(WebScraper):
     '''
 
     def __init__(self, *, keys, **kwargs):
+        pass

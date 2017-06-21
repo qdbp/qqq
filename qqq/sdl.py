@@ -11,3 +11,6 @@ def mk_sdl_surface(w, h, depth=32):
         raise ValueError('null pointer to surface returned')
     else:
         return sp.contents
+
+
+

@@ -204,7 +204,7 @@ def compress_qualname(qname, module):
 
 
 def setup_logger(logger, *, log_fn, log_level=lgg.INFO,
-                 log_to_stdout=True, log_to_file=True, mode='a'):
+                 log_to_stdout=True, log_to_file=False, mode='a'):
     '''
     Sets up the logger. Should not be called directly.
 
