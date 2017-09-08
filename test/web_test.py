@@ -2,7 +2,7 @@ import os
 
 import pytest
 
-from qqq.qio_web import HTMLCutter as HC
+from qqq.web import HTMLCutter as HC
 from lxml.etree import XPathEvalError
 
 

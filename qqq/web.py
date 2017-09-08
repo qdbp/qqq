@@ -4,17 +4,17 @@ Module implementing classes to facilitate web scraping.
 import re
 import sys
 from collections import defaultdict
-from collections.abc import Collection  # type: ignore
 from functools import partial
 from queue import PriorityQueue, Queue
 from threading import Lock
-from typing import (Any, Callable, Dict, Generic, Iterable, List, NewType, Set,
+from typing import (Any, Collection, Callable, Dict, Generic, Iterable, List, NewType, Set,
                     Tuple, TypeVar, Union)
 
 import requests as rqs
 from lxml.html import etree, fromstring, tostring
 
-from .io import PoolThrottle, QueueProcessor
+from .io import PoolThrottle, ConcurrentProcessor
+from .util import Prio
 
 URL = NewType('URL', str)
 T = TypeVar('T')
@@ -193,7 +193,7 @@ class WebScraper(Generic[T]):
         self, *,
         seed: Union[URL, Iterable[URL]],
         payload_callback: Callable[[rqs.Request], T],
-        url_callback: Callable[[rqs.Request], Iterable[URL]]=None,
+        url_callback: Callable[[rqs.Request], Iterable[Union[Prio, URL]]]=None,
         crawled: Collection[URL]=None,
         requests_kwargs: Dict[str, Any]=None,
         scraper_workers: int=8,
@@ -206,7 +206,6 @@ class WebScraper(Generic[T]):
             'AppleWebKit/537.36 (KHTML, like Gecko) '
             'Chrome/58.0.3029.110 Safari/537.36'),
     ) -> None:
-
         '''
         Notation:
             URX:
@@ -306,7 +305,7 @@ class HTMLScraper(WebScraper):
 
     def __init__(
         self, *,
-        seed_url: Union[URL, Iterator[URL]],
+        seed_url: Union[URL, Iterable[URL]],
         crawl_spec: CrawlSpec,
         url_cutter: HTMLCutter=None,
     ) -> None:
@@ -326,7 +325,7 @@ class HTMLScraper(WebScraper):
                 internally to fetch the web pages.
         '''
 
-        if not isinstance(seed_url, Iterator):
+        if not isinstance(seed_url, Iterable):
             seed_url = iter([seed_url])
 
         def url_callback(url, html_str):

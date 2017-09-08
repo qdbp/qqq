@@ -3,87 +3,12 @@ from warnings import warn
 
 import numpy as np
 import numpy.random as npr
-import theano as th
-import theano.tensor as T
-from tqdm import tqdm
 
-from .util import ensure_list, check_all_same_length
+from .util import as_list, check_all_same_length
+from .qlog import get_logger
 
 
-def gen_mlc_weights(Y, a=0.01, dist_weight=1, n_iter=100000, lbd=0.05):
-    '''
-    Generates multilabel classification sample weights.
-
-    Solve for probability over Y, p, such that
-      a*H(p)/log(N) - sum([H(y_i)/(log(2)*len(labels)) for i in labels])
-    is maximized.
-
-    This process can be quite slow, but produces a good distribution. It's
-    worth it, given it only needs to be run once per data set.
-
-    Arguments:
-        dist_weight: relative weight of the distribution entropy loss
-        n_iter: number of iterations for which to train
-    '''
-
-    N = Y.shape[0]
-
-    # t_Hp_fac = th.shared(dist_weight / np.log(N))
-    t_Hb_fac = th.shared(1 / (Y.shape[1] * np.log(2)))
-
-    t_softits = th.shared(npr.normal(-np.log(N), 0.1, Y.shape[0]))
-    t_Y = th.shared(Y)
-
-    # t_base_prob = th.shared(-np.log(N))
-    # t_lambda = th.shared(0.1)
-
-    def softmax(arr):
-        e = T.exp(arr)
-        return e / T.sum(e)
-
-    def bentropy(marg):
-        return -T.sum(marg * T.log(marg) + (1 - marg) * T.log(1 - marg))
-
-    def entropy(softits):
-        p = softmax(softits)
-        return -T.sum(p * T.log(p))
-
-    # dist_gain = t_Hp_fac * entropy(t_softits)
-    marg = T.dot(softmax(t_softits), t_Y)
-    marg_gain = t_Hb_fac * bentropy(marg)
-    # reg_loss = t_lambda * T.mean((t_softits - t_base_prob) ** 2)
-    reg_loss = lbd * (T.max(t_softits) - T.min(t_softits))
-    # t_gain = dist_gain + marg_gain - reg_loss
-    t_gain = marg_gain - reg_loss
-
-    t_a = th.shared(a)
-    # ghetto nesterov momentum
-    t_b = th.shared(0.999)
-    t_d = th.shared(np.zeros(Y.shape[0]))
-    g = th.grad(t_gain, t_softits)
-
-    f = th.function(
-        [],
-        # [dist_gain, marg_gain, reg_loss],
-        [marg_gain, reg_loss],
-        updates=[
-            (t_softits, t_softits + t_a * t_d),
-            (t_d, t_b * t_d + g),
-        ],
-    )
-
-    print(f()[0])
-    pbar = tqdm(range(n_iter), desc='optimizing sampling distribution')
-    for i in pbar:
-        x = f()
-        if not i % 100:
-            pbar.set_description(
-                # f'normed sampling distribution entropy {float(x[0]):4.3f}, '
-                f'normed marginal entropy {float(x[0]):4.3f} '
-                f'regularizer loss {float(x[1]):4.3f}'
-            )
-
-    return th.function([], [softmax(t_softits)])()[0]
+LOG = get_logger(__name__)
 
 
 def undersample_mlc(y):
@@ -183,8 +108,30 @@ def dict_tv_split(*ds, f_train=0.85, shuffle=True, seed=None):
     return train_dicts, val_dicts
 
 
-def generate_batches(x_dict, y=None, *, bs=128,  # noqa
-                     balance=False, sample_weights=None, sequential=False):
+def get_train_test_gens(x_dict, y_dict, val_split, seed=None, **kwargs):
+
+    if kwargs.pop('bound_ixes', None) is not None:
+        LOG.warn(f'ignoring passed bound_ixes in favour of random split')
+
+    npr.seed(seed)
+    random_ixes = npr.permutation(len([*x_dict.values()][0]))
+    n_train = int(val_split * len(random_ixes))
+
+    gen_t = generate_batches(
+        x_dict, y=y_dict, bound_ixes=random_ixes[:n_train], **kwargs,
+    )
+    gen_v = generate_batches(
+        x_dict, y=y_dict, bound_ixes=random_ixes[n_train:], **kwargs,
+    )
+
+    return gen_t, gen_v
+
+
+def generate_batches(
+        x_dict, *, y=None,
+        bs=128, balance=False, sequential=False,
+        sample_weights=None, bound_ixes=None,
+        ):
     '''
     Generate batches of data from a larger array.
 
@@ -199,6 +146,10 @@ def generate_batches(x_dict, y=None, *, bs=128,  # noqa
         sequential: if True, will iterate over the input arrays in sequence,
             yielding contiguous batches. Still yields forever, looping to the
             start when input arrays are exhausted
+        bound_ixes: sequence of indicies into the x/y arrays. Elements at those
+            indices will be treated as though they comprise the whole array.
+            In sequential mode, elements will be traversed in the order given
+            by this sequence.
     Yields:
         Xb: dictionary of x batches
         Yb: dictionary of y batches, or None
@@ -206,20 +157,26 @@ def generate_batches(x_dict, y=None, *, bs=128,  # noqa
     y_dict = y or {}
     have_y = bool(y_dict)
 
-    n_samples = check_all_same_length(*x_dict.values(), *y_dict.values())
+    raw_n_samples = check_all_same_length(*x_dict.values(), *y_dict.values())
+    if bound_ixes is None:
+        ix_arange = np.arange(raw_n_samples, dtype=np.uint64)
+    else:
+        ix_arange = np.array(bound_ixes)
+    n_samples = len(ix_arange)
 
     # explicit weights overrde balancing
     have_sw = sample_weights is not None
     if have_sw:
-        probs = sample_weights.astype(np.float64) / sample_weights.sum()
+        sample_weights = np.array(sample_weights)[ix_arange].astype(np.uint64)
+        probs = sample_weights / sample_weights.sum()
         balance = False
 
     elif balance and have_y:
-        if len(list(y_dict)) != 1:
+        if len(y_dict) != 1:
             raise ValueError(
                 'balancing is undefined when multiple label sets are present')
 
-        y_arr = list(y_dict.values())[0]
+        y_arr = list(y_dict.values())[0][bound_ixes]
         if np.max(y_arr.sum(axis=1) > 1.):
             warn('given label array does not appear to be one-hot encoded',
                  RuntimeWarning)
@@ -228,18 +185,17 @@ def generate_batches(x_dict, y=None, *, bs=128,  # noqa
         n_classes = y_arr.shape[1]
         p_ixes = y_arr.argmax(axis=1)
         probs = (
-            np.ones(len(y_arr), dtype=np.float64) /
+            np.ones(n_samples, dtype=np.float64) /
             (n_classes * n_per_class[p_ixes])
         )
     else:
         probs = np.ones(n_samples) / n_samples
 
-    ix_arange = np.arange(n_samples, dtype=np.uint64)
     seq = 0
 
     while True:
         if sequential:
-            ixes = np.arange(seq, seq + bs) % n_samples
+            ixes = ix_arange[np.arange(seq, seq + bs) % n_samples]
             seq = (seq + bs) % n_samples
         else:
             ixes = npr.choice(ix_arange, size=bs, p=probs)
@@ -261,7 +217,7 @@ def apply_bts(gen, bts, *, train):
 
 def batch_transformer( # noqa
     f, *, inplace: bool, mode='each', get_shape=None,
-    in_keys=None, out_keys=None, pop_in_keys=True, out_in_ys=None,
+    in_keys=None, out_keys=None, out_in_ys=None, pop_in_keys=True,
     train_only=False):
     '''
     Transforms functions over individual samples into functions taking
@@ -304,7 +260,7 @@ def batch_transformer( # noqa
 
     get_shape = get_shape or (lambda shape: shape)
 
-    in_keys = ensure_list(in_keys, allow_none=True)
+    in_keys = as_list(in_keys)
     if out_keys and inplace:
         raise ValueError('cannot set explicit out_keys if inplace is True')
 

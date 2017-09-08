@@ -1,16 +1,7 @@
-import argparse as arg
-import cmd
 import concurrent.futures as cfu
-# from functools import partial
 import os
-import os.path as osp
-import sys
 from abc import abstractmethod
 from collections import defaultdict
-from datetime import datetime as dtt
-from datetime import timedelta
-from glob import glob
-from threading import Lock, Thread
 from typing import Optional
 
 import click as clk
@@ -25,12 +16,12 @@ import numpy.random as npr
 from colored import attr, fg
 from keras.callbacks import Callback
 from keras.datasets import mnist
-from keras.engine.topology import Layer
-from keras.layers.noise import GaussianNoise
 from keras.utils import to_categorical
+from keras.models import Model
 from tqdm import tqdm
 
-from qqq.qlog import get_logger
+from .qlog import get_logger
+from .util import as_list
 
 LOG = get_logger(__file__)
 
@@ -68,6 +59,27 @@ def apply_layers(inp, *stacks, td=False):
     return y
 
 
+def compile_model(
+        i, y, *,
+        loss='categorical_crossentropy',
+        optimizer='nadam',
+        metrics=None):
+
+    if loss == 'cxe':
+        loss = 'categorical_crossentropy'
+    if loss == 'bxe':
+        loss = 'binary_crossentropy'
+
+    i = as_list(i)
+    y = as_list(y)
+
+    metrics = metrics or []
+    m = Model(inputs=i, outputs=y)
+    m.compile(loss=loss, optimizer=optimizer, metrics=metrics)
+
+    return m
+
+
 def shuffle_weights(weights):
     return [npr.permutation(w.flat).reshape(w.shape) for w in weights]
 
@@ -84,6 +96,7 @@ def get_callbacks(
             f'./weights/{name}.hdf5', save_best_only=True, monitor=monitor),
         ValLossPP(),
         KQLogger(name),
+        kcb.CSVLogger(f'./logs/{name}.csv'),
         # kcb.ReduceLROnPlateau(
         #     patience=pat_lr, factor=1/np.e, monitor=monitor),
         # linear lr schedule
@@ -97,8 +110,9 @@ def get_callbacks(
 
     return out
 
+
 # DATA
-def standard_mnist(flatten=True):
+def standard_mnist(flatten=True, featurewise_norm=True):
     (Xt, yt), (Xv, yv) = mnist.load_data()
 
     Xt = Xt.reshape(Xt.shape[0],
@@ -106,7 +120,10 @@ def standard_mnist(flatten=True):
     Xv = Xv.reshape(Xv.shape[0],
                     -1 if flatten else Xv.shape[1:]).astype(np.float32)
 
-    m = np.mean(Xt, axis=0)
+    if featurewise_norm:
+        m = np.mean(Xt, axis=0)
+    else:
+        m = np.mean(Xt)
     s = np.std(Xt)
 
     Xt = (Xt - m) / s
@@ -182,7 +199,6 @@ class HypergradientScheduler(Callback):
     mixing in a multiplier rather than overwriting the lr wholesale.
     '''
     # FIXME: can only be feasibly implemented as an optimizer
-
 
 
 class KQLogger(Callback):
@@ -295,10 +311,21 @@ class LiveLossPlot(Callback):
         self._setup_axes()
 
     def _get_lab_axis(self, lab):
-        return self.ax if not self._is_lab_acc(lab) else self.ax_acc
+        return self.ax_acc if self._is_lab_acc(lab) else self.ax
 
     def _is_lab_acc(self, lab):
-        return 'accuracy' in lab
+        return 'acc' in lab
+
+    def _recenter_axes(self):
+        self.ax.autoscale()
+
+        self.ax.set_ylim(bottom=0)
+        self.ax_acc.set_ylim((0., 1))
+
+        self.ax.set_xlim(left=1)
+
+        self.ax.margins(0.1)
+        self.ax_acc.margins(0.1)
 
     def _setup_axes(self):
         self.fig = plt.figure()
@@ -311,16 +338,17 @@ class LiveLossPlot(Callback):
         self.ax.set_xscale('log')
         self.ax.yaxis.set_minor_locator(mtick.AutoMinorLocator(n=5))
         self.ax.yaxis.set_minor_formatter(mtick.NullFormatter())
-        self.ax.grid(b=True, which='major', color='#999999', lw=0.3)
-        self.ax.grid(b=True, which='minor', color='#aaaaaa', lw=0.3, ls=':')
+        self.ax.grid(b=True, which='major', color='#7799bb', lw=0.3)
+        self.ax.grid(b=True, which='minor', color='#88aacc', lw=0.3, ls=':')
 
         self.ax_acc = self.ax.twinx()
-        self.ax_acc.grid(b=True, which='major', color='#999999', lw=0.3)
         self.ax_acc.grid(
-            b=True, which='minor', color='#aaaaaa', lw=0.3, ls=':')
+            b=True, which='major', color='#bb9977', lw=0.3)
+        self.ax_acc.grid(
+            b=True, which='minor', color='#ccaa88', lw=0.3, ls=':')
 
         self.ax_acc.set_ylabel('accuracy')
-        self.ax_acc.set_ylim((0.5, 1))
+        self._recenter_axes()
 
         os.makedirs('./plots/', exist_ok=True)
 
@@ -350,6 +378,7 @@ class LiveLossPlot(Callback):
 
         if new_lines:
             self.ax.legend(loc=3)
+            self.ax_acc.legend(loc=6)
 
         if to_plot:
             lc = mplc.LineCollection(to_plot, colors=colors, linewidths=0.75)
@@ -357,11 +386,8 @@ class LiveLossPlot(Callback):
                 to_plot_acc, colors=colors_acc, linewidths=0.75)
             self.ax.add_collection(lc)
             self.ax_acc.add_collection(lc_acc)
-            self.ax.autoscale()
-            self.ax.set_ylim(bottom=0)
-            self.ax.set_xlim(left=1)
-            self.ax.margins(0.1)
-            self.ax_acc.set_ylim((0.5, 1))
+
+            self._recenter_axes()
 
             self.fig.canvas.draw()
             self.fig.savefig(f'./plots/{self.name}.svg')

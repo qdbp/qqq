@@ -7,7 +7,7 @@ import threading
 import numpy.random as npr
 import pytest
 
-import qqq.qio as qio
+import qqq.io as qio
 
 
 def test_expander():
@@ -52,6 +52,23 @@ def test_mtmqm():
             print(oq.get())
 
     print([oq.qsize() for oq in qp.output_qs])
+
+
+def test_concurrent_processor():
+
+    input_q = Queue()
+
+    for i in range(100):
+        input_q.put(i)
+
+    def work_func(x):
+        return x ** 2
+
+
+    cp = qio.ConcurrentProcessor(
+        input_q, work_func,
+    )
+        
 
 
 def test_poolthrottle():

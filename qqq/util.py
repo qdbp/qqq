@@ -1,10 +1,15 @@
-from collections.abc import Mapping, Sequence
+from functools import namedtuple
+from collections.abc import Mapping, Sequence, Iterable
 from functools import wraps
 from inspect import signature, Parameter
 import os.path as osp
 import pickle
 import time
 from threading import Lock
+from typing import Generic, TypeVar
+
+
+Prio = namedtuple('Prio', ('prio', 'value'))
 
 
 def ensure_type(obj, t, *args, **kwargs):
@@ -16,16 +21,21 @@ def ensure_type(obj, t, *args, **kwargs):
         return obj
 
 
-def ensure_list(obj, *, allow_none=False):
+def as_list(obj):
+    '''
+    Ensures output is a list of objects.
+
+    Iterables are read into a list, non-iterables are wrapped in a singleton
+    list.
+    '''
+
     if obj is None:
-        if allow_none:
-            return None
-        else:
-            raise ValueError('the argument is None!')
-    elif not isinstance(obj, list):
-        return [obj]
+        return []
+
+    if isinstance(obj, (list, tuple)):
+        return list(obj)
     else:
-        return obj
+        return [obj]
 
 
 def sift_kwargs(f):
@@ -93,6 +103,7 @@ def pickled(fn, func, *args, **kwargs):
         with open(fn, 'wb') as f:
             pickle.dump(out, f)
     return out
+
 
 class UQLError(Exception): pass  # noqa
 
