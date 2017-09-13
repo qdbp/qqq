@@ -1,23 +1,34 @@
 '''
 Module implementing classes to facilitate web scraping.
 '''
-import re
 import sys
-from collections import defaultdict
+from collections import Counter, defaultdict
 from functools import partial
-from queue import PriorityQueue, Queue
+from heapq import heappop, heappush
+from queue import PriorityQueue as PQ
+from queue import Queue
 from threading import Lock
-from typing import (Any, Collection, Callable, Dict, Generic, Iterable, List, NewType, Set,
-                    Tuple, TypeVar, Union)
+from typing import (Any, Callable, Dict, Generic, Iterable, List, NewType,
+                    Optional, Set, Tuple, TypeVar, Counter as CounterT)
+import time
 
-import requests as rqs
+import regex
+import requests.exceptions as rqe
 from lxml.html import etree, fromstring, tostring
+from requests import get as http_get, head as http_head
+from requests import Response
+from tldextract import extract as tldx
 
-from .io import PoolThrottle, ConcurrentProcessor
-from .util import Prio
+from .io import ConcurrentProcessor as CP, QueueReader
+from .io import Controller, FIFOWorker, PipeWorker, PoolThrottle, QueueTee
+from .qlog import get_logger
+from .util import ensure_type
 
 URL = NewType('URL', str)
+UResp = Tuple[URL, Response]
 T = TypeVar('T')
+LOG = get_logger(__file__)
+DEBUG = LOG.debug
 
 
 class HTMLCutter:
@@ -37,7 +48,7 @@ class HTMLCutter:
         >>> hc = HTMLCutter()\\
         ...     .xp('//p[@class="main-text"]')\\
         ...     .strip("a")\\
-        ...     .text()\\ 
+        ...     .text()\\
         ...     .re(r"[A-Z][a-z]+")
         >>> hc.cut(rqs.get("www.example.com").text)
 
@@ -98,7 +109,14 @@ class HTMLCutter:
 
     def __init__(self, init_state: Callable[[str], List[Any]]=None) -> None:
         self.opseq = []  # type: List[Callable[..., Any]]
-        self.init_state = init_state or (lambda s: [fromstring(s)])
+        if init_state is not None:
+            self.init_state = init_state
+
+    def init_state(self, s):  # type: ignore
+        try:
+            return fromstring(s)
+        except Exception as e:
+            return []
 
     def fn(self, func: Callable):
         self.opseq.append(func)
@@ -117,7 +135,7 @@ class HTMLCutter:
         return self
 
     def re(self, regexp: str):
-        rx = re.compile(regexp)
+        rx = regex.compile(regexp)
         self.opseq.append(lambda s: rx.findall(s))
         return self
 
@@ -142,7 +160,7 @@ class HTMLCutter:
     def cut(self, html_str: str) -> List[Any]:
         state = self.init_state(html_str)
         for opx, op in enumerate(self.opseq):
-            if not state:
+            if len(state) == 0:
                 return state
             try:
                 state = [op(s) for s in state]
@@ -150,10 +168,7 @@ class HTMLCutter:
                 if isinstance(state[0], list):
                     state = sum(state, [])
             except Exception:
-                print(
-                    f'invalid op {op} on state {state}, index {opx}',
-                    file=sys.stderr,
-                )
+                LOG.error(f'invalid op {op} on state {state}, index {opx}')
                 raise
 
         return state
@@ -162,49 +177,92 @@ class HTMLCutter:
         return HTMLCutter(init_state=lambda s: self.cut(s) + hc.cut(s))
 
 
-class CrawlSpec:
+class Requester:
+
+    def __init__(
+            self, *, headers=None, types=None,
+            referer='https://www.google.com',
+            user_agent=(
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                'AppleWebKit/537.36 (KHTML, like Gecko) '
+                'Chrome/58.0.3029.110 Safari/537.36'),
+            timeout=0.5,
+            throttle_pool=10, throttle_window=0.1, **kwargs) -> None:
+
+        self._done_init = False
+
+        self.timeout = timeout
+        self.types = {'text/html'} if types is None else types
+        self.headers = {
+            'referer': referer,
+            'user-agent': user_agent,
+        } if headers is None else headers
+        self.kwargs = kwargs
+
+        self.throttle_pool = throttle_pool
+        self.throttle_window = throttle_window
+
+        self._done_init = True
+        self.__recompile_get()
+
+    def __recompile_get(self) -> None:
+        self._pool = PoolThrottle(
+            pool=self.throttle_pool,
+            window=self.throttle_window,
+        )
+
+        self._http_head = self._pool(partial(
+            http_head, headers=self.headers, timeout=self.timeout,
+            **self.kwargs,
+        ))
+        self._http_get = self._pool(partial(
+            http_get, headers=self.headers, timeout=self.timeout,
+            **self.kwargs,
+        ))
+
+        def get(url: URL) -> Optional[Response]:
+            resp = self._http_head(url)
+
+            # follow redirects
+            ix = 3
+            while resp.status_code == 301 and ix > 0:
+                resp = self._http_head(resp.headers['location'])
+                ix -= 1
+
+            if 'content-type' in resp.headers and any([
+                    ct in resp.headers['content-type']
+                    for ct in self.types]):
+                # mypy support for decorators isn't there yet
+                return self._http_get(url)  # type: ignore
+            return None
+
+        self.get = get
+
+    def __setattr__(self, key, value):
+        super().__setattr__(key, value)
+        if key in {
+                'types', 'headers', 'timeout',
+                'throttle_pool', 'throttle_window'}:
+            if self._done_init:
+                self.__recompile_get()
+
+
+class HTTPScraper(Controller, Generic[T]):
     '''
-    Class managing cutters to run on a per-url basis.
+    Base class for scraping of HTTP based resources.
+
+    Utilizes a callback-centric design. Built with the requests library
+    and uses its Request object - no need to reinvent the wheel.
     '''
-
-    def __init__(self):
-        self.filter_bank =\
-            defaultdict(dict)  # type: Dict[Any, Dict[str, HTMLCutter]]
-
-    def add(self, urx: str, cutter_dict: Dict[str, HTMLCutter]) -> 'CrawlSpec':
-        urx_re = re.compile(urx)
-        self.filter_bank[urx_re].update(cutter_dict)
-        return self
-
-    def cut(self, url, html_str):
-        output = {}
-        for regexp, cutter_dict in self.filter_bank.items():
-            if regexp.findall(url):
-                output.update({
-                    key: cutter.cut(html_str)
-                    for key, cutter in cutter_dict.items()
-                })
-        return output
-
-
-class WebScraper(Generic[T]):
 
     def __init__(
         self, *,
-        seed: Union[URL, Iterable[URL]],
-        payload_callback: Callable[[rqs.Request], T],
-        url_callback: Callable[[rqs.Request], Iterable[Union[Prio, URL]]]=None,
-        crawled: Collection[URL]=None,
-        requests_kwargs: Dict[str, Any]=None,
-        scraper_workers: int=8,
-        process_workers: int=2,
-        throttle_pool=1,
-        throttle_window=0.2,
-        referer='https://www.google.com',
-        user_agent=(
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
-            'AppleWebKit/537.36 (KHTML, like Gecko) '
-            'Chrome/58.0.3029.110 Safari/537.36'),
+        requester: Requester,
+        payload_worker_factory: Callable[[], PipeWorker[UResp, T]],
+        urls_q: Queue,
+        n_scraper_workers: int=16,
+        n_payload_workers: int=2,
+        extra_headers=None,
     ) -> None:
         '''
         Notation:
@@ -225,124 +283,246 @@ class WebScraper(Generic[T]):
                 A callable invoked on every Request, returning an iterable
                 of URLs. These will be added to the crawling queue and
                 scraped in turn.
-            crawled:
+            crawled_urls:
                 set of URLs to be considered already visited. any URL contained
                 in it will not be scraped.
         '''
 
-        self.f_get = PoolThrottle(pool=throttle_pool, window=throttle_window)(
-            partial(
-                rqs.get, headers={
-                    'referer': referer,
-                    'user-agent': user_agent,
-                },
-                **(requests_kwargs or {}),
-            )
-        )
+        Controller.__init__(self)
 
-        self.url_callback = url_callback
-        self.payload_callback = payload_callback
+        self.requester = requester
+        self.urls_q = ensure_type(urls_q, Queue)
 
-        self.urls_q = PriorityQueue()  # type: PriorityQueue
-        self.html_q = Queue()  # type: Queue[str]
-
-        self.crawled = crawled or set()
-        self.crawled_lock = Lock()
-
-        if not isinstance(seed, Iterable):
-            seed = (seed,)
-        for url in seed:
-            self.urls_q.put((1, url))  # type: ignore
-            self.crawled.add(url)  # type: ignore
-
-        self._scrape_qp = QueueProcessor(
+        self._scrape_processor: CP[URL, UResp] = CP(
+            'scrape processor',
             input_q=self.urls_q,
-            work_func=self._scrape,
-            n_workers=scraper_workers,
+            worker_factory=FIFOWorker.mk_factory(self._scrape),
+            n_workers=n_scraper_workers,
             unpack=True, prio=True,
+            output_limit=5, buffer_size=2,
         )
 
-        self._dissect_qp = QueueProcessor(
-            input_q=self._scrape_qp.output_q,
-            work_func=self._dissect,
-            n_workers=process_workers,
+        self._payload_processor: CP[UResp, T] = CP(
+            'payload processor',
+            input_q=self._scrape_processor.output_q,
+            worker_factory=payload_worker_factory,
+            n_workers=n_payload_workers,
             output_limit=50,
         )
 
-        self.output_q = self._dissect_qp.output_q
+        self.output_q = self._payload_processor.output_q
 
-    def run(self):
+        self.add_subordinate(self._payload_processor)
+        self.add_subordinate(self._scrape_processor)
+
+    def _scrape(self, url: URL) -> Optional[UResp]:
+        try:
+            resp = self.requester.get(url)
+            if resp is None:
+                return None
+        except (rqe.RequestException, rqe.ConnectionError) as e:
+            return None
+
+        LOG.verbose(f'got {resp.status_code} from {url[:50]}')
+        return (url, resp)
+
+
+class URLPrioritizer(PipeWorker[UResp, URL]):
+    '''
+    Prioritizes URLs for scraping based according to given mode.
+
+    Also responsible for excluding already seen URLs.
+    '''
+
+    def __init__(
+            self, *,
+            seen_urls: Set[URL], seen_urls_lock: Lock,
+            domain_counter: CounterT[URL],
+            url_func: Callable[[Response], Iterable[URL]],
+            mode='breadth',
+            **kwargs) -> None:
+
+        self.mode = mode
+        self.url_func = url_func
+
+        self.seen_urls: Set[URL] = seen_urls
+        self.seen_urls_lock = seen_urls_lock
+        self.domain_counter = domain_counter
+
+        self._url_heap: List[Tuple[int, URL]] = []
+
+    @classmethod
+    def mk_factory(
+            cls, url_func,
+            seen_urls=None,
+            counter=None,
+            lock=None,
+            **kwargs) -> Callable[[], "URLPrioritizer"]:
+
+        if seen_urls is None:
+            seen_urls = set()
+        if counter is None:
+            counter = Counter()
+        if lock is None:
+            lock = Lock()
+
+        def factory():
+            return cls(
+                seen_urls=seen_urls,
+                seen_urls_lock=lock,
+                domain_counter=counter,
+                url_func=url_func,
+                **kwargs)
+
+        return factory
+
+    def can_absorb(self):
+        return True
+
+    def absorb(self, uresp: UResp) -> None:
+        url, resp = uresp
+        t = time.time()
+        new_urls = {*self.url_func(resp)}
+        dt = time.time() - t
+        if dt > 1:
+            LOG.warning(f'took {dt:.3f} to cut url {url}')
+
+        with self.seen_urls_lock:
+            new_urls -= self.seen_urls
+            self.seen_urls |= new_urls
+
+        for new_url in new_urls:
+            dom = tldx(new_url).domain
+            self.domain_counter[dom] += 1
+            prio = self.domain_counter[dom] + url.count('/')
+            psh = (prio, new_url)
+            heappush(self._url_heap, psh)
+            self.seen_urls.add(new_url)
+
+    def _emit(self) -> Optional[URL]:
+        try:
+            return heappop(self._url_heap)[1]
+        except IndexError:
+            raise PipeWorker.EmptyEmit
+
+
+class CrawlSpec:
+    '''
+    Class managing cutters to run on a per-url basis.
+    '''
+
+    def __init__(self):
+        self.cutter_bank: Dict[Any, Dict[str, HTMLCutter]] = defaultdict(dict)
+
+    def add(self, urx: str, key: str, cutter: HTMLCutter) -> 'CrawlSpec':
         '''
-        initiates the scraper.
-
-        no requests are sent before this method is called
+        Adds cutter(s) to extract content on URLs matching urx and classify
+        it under key.
         '''
-        self._scrape_qp.run()
-        self._dissect_qp.run()
 
-    def _scrape(self, prio: int, url: URL):
-        resp = self.f_get(url)
-        return (url, resp.text)
+        urx_re = regex.compile(urx)
+        if urx_re in self.cutter_bank and key in self.cutter_bank[urx_re]:
+            LOG.warning(f'Overwriting cutter for key {key} at urx {urx}!')
+        if key == 'url':
+            LOG.warning(
+                'Overwriting the default key "url"! Source url '
+                'will not be in output.'
+            )
 
-    def _dissect(self, scrapeload: Tuple[URL, str]):
-        url, html_str = scrapeload
+        self.cutter_bank[urx_re][key] = cutter
+        return self
 
-        if self.url_callback is not None:
-            urls = self.url_callback(url, html_str)
-            with self.crawled_lock:
-                for url in urls:
-                    if url not in self.crawled:
-                        self.crawled.add(url)
-                        self.urls_q.put((0, url))
+    def cut(self, uresp: UResp) -> Dict[str, Any]:
+        '''
+        Runs the stored filter bank against HTML given by `html_str`,
+        deciding which filters to match based on `url`.
+        '''
+        url, resp = uresp
+        html_str = resp.text
 
-        return self.payload_callback(url, html_str)
+        output = {'url': url}
+        for regexp, cutter_dict in self.cutter_bank.items():
+            if regexp.findall(url):
+                output.update({
+                    key: cutter.cut(html_str)
+                    for key, cutter in cutter_dict.items()
+                })
+        return output
 
 
-class HTMLScraper(WebScraper):
+class HTMLScraper(HTTPScraper[T], Generic[T]):
     '''
     Crawls HTML websites.
     '''
 
     def __init__(
         self, *,
-        seed_url: Union[URL, Iterable[URL]],
-        crawl_spec: CrawlSpec,
-        url_cutter: HTMLCutter=None,
+        seed_urls: Iterable[URL],
+        payload_worker_factory: Callable[[], PipeWorker[UResp, T]],
+        url_factory: Callable[[], URLPrioritizer]=None,
+        url_func=None,
+        crawled_urls: Set[URL]=None,
+        n_url_workers: int=3,
+        url_q_size=10,
+        **kwargs,
     ) -> None:
         '''
         Notation:
-            URX:
-                "URL regular expression", a regular expression matching certain
-                crawlable URLs.
+            URX: "URL regular expression", a regular expression matching
+            certain crawlable URLs.
         Arguments:
             seed_url:
                 url from which crawling begins
-            crawled:
-                set of URLs to be considered already visited. any URL contained
-                in it will not be scraped.
+            crawlspec:
+                CrawlSpec instance to extract interesting payloads from data
+                on a per-url basis.
             kwargs:
                 keyword arguments to pass to the `qio.Scraper` instance used
                 internally to fetch the web pages.
         '''
 
-        if not isinstance(seed_url, Iterable):
-            seed_url = iter([seed_url])
+        self._reader = QueueReader(seed_urls, maxsize=url_q_size)
 
-        def url_callback(url, html_str):
-            return url_cutter.cut(html_str)
-
-        def payload_callback(url, html_str):
-            return crawl_spec.cut(url, html_str)
-
-        super().__init__(
-            seed_generator=seed_url,
-            url_callback=url_callback,
-            payload_callback=payload_callback,
+        HTTPScraper.__init__(
+            self,
+            urls_q=self._reader.output_q,
+            payload_worker_factory=payload_worker_factory,
             **kwargs,
         )
+        self.add_subordinate(self._reader)
+
+        self._resp_tee: QueueTee[UResp] = QueueTee(
+            input_q=self._scrape_processor.output_q,
+            output_qs=2, maxsize=5,
+        )
+        self.add_subordinate(self._resp_tee)
+
+        self._payload_processor.set_input_q(self._resp_tee[0])
+
+        if url_factory is None:
+            if url_func is None:
+                raise ValueError(
+                    'must provide a url extraction function '
+                    'if using the default URLPrioritizer'
+                )
+
+            url_factory = URLPrioritizer.mk_factory(
+                url_func=url_func,
+            )
+
+        self._url_processor: CP[UResp, URL] = CP(
+            'url_processor',
+            input_q=self._resp_tee[1],
+            output_q=self.urls_q,
+            worker_factory=url_factory,
+            n_workers=n_url_workers,
+            output_limit=5,
+        )
+        
+        self.add_subordinate(self._url_processor)
 
 
-class JSONScraper(WebScraper):
+class JSONScraper(HTTPScraper):
     '''
     Crawls a json API.
     '''

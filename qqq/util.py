@@ -9,7 +9,7 @@ from threading import Lock
 from typing import Generic, TypeVar
 
 
-Prio = namedtuple('Prio', ('prio', 'value'))
+PrioTup = namedtuple('PrioTup', ('prio', 'value'))
 
 
 def ensure_type(obj, t, *args, **kwargs):

@@ -18,6 +18,7 @@ COLOR_ERROR = '#bf6956'
 COLOR_WARNING = '#dc9656'
 
 VERBOSE = 15
+lgg.addLevelName(VERBOSE, 'Verbose')
 
 
 class QBox:
@@ -151,21 +152,28 @@ def fun_from_frame(frame):
 
 class QLogger(lgg.Logger):
 
-    def verbose(self, *args, **kwargs):
+    def verbose(self, msg, *args, **kwargs):
         if self.isEnabledFor(VERBOSE):
-            self._log(VERBOSE, *args, **kwargs)
+            self._log(VERBOSE, msg, args, **kwargs)
 
-    def _log(self, *args, **kwargs):
+    def _log(self, level, msg, args, **kwargs):
         # _log -> info, etc. -> true caller
         frame = inspect.currentframe().f_back.f_back
         fun = fun_from_frame(frame)
 
-        qname = compress_qualname(fun.__qualname__, fun.__module__)
+        if fun is not None:
+            qname = fun.__qualname__
+            module = fun.__module__
+        else:
+            qname = '-'
+            module = '-'
+
+        qname = compress_qualname(qname, module)
 
         kwargs['extra'] = kwargs.get('extra', {})
         kwargs['extra']['qname'] = qname
 
-        return super()._log(*args, **kwargs)
+        return super()._log(level, msg, args, **kwargs)
 
 
 lgg.setLoggerClass(QLogger)
