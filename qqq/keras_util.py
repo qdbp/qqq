@@ -86,7 +86,7 @@ def shuffle_weights(weights):
 
 
 def get_callbacks(
-        name, *, pat_stop=9, pat_lr=3, plot=True, val=True,
+        name, *, pat_stop=9, pat_lr=3, plot=False, val=True,
         epochs=50, base_lr=0.001):
     '''
     Returns some sensible default callbacks for Keras model training.
