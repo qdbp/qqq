@@ -1,5 +1,6 @@
 import concurrent.futures as cfu
 import os
+import os.path as osp
 from abc import abstractmethod
 from collections import defaultdict
 from typing import Optional
@@ -85,12 +86,16 @@ def shuffle_weights(weights):
 
 
 def get_callbacks(
-        name, *, pat_stop=9, pat_lr=3, plot=True, val=True,
+        name, *, pat_stop=9, pat_lr=3, plot=False, val=True,
         epochs=50, base_lr=0.001):
     '''
     Returns some sensible default callbacks for Keras model training.
     '''
     monitor = 'val_loss' if val else 'loss'
+
+    os.makedirs('./weights/', exist_ok=True)
+    os.makedirs('./logs/', exist_ok=True)
+
     out = [
         kcb.ModelCheckpoint(
             f'./weights/{name}.hdf5', save_best_only=True, monitor=monitor),
