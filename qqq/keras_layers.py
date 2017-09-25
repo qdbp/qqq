@@ -1,5 +1,6 @@
 from keras.engine.topology import Layer
 from keras.layers import GRU
+from keras.wrappers import Wrapper
 from keras import backend as K
 
 import numpy as np
@@ -39,15 +40,33 @@ class NegGrad(Layer):
 
 # WRAPPERS
 
-class RNNUnroll:
+class RecursiveUnroll(Wrapper):
     '''
     Applies an RNN to a fixed input vector and its own output to produce
     an output sequence.
     '''
 
-    def __init__(self, layer, output_length, *, consume_output=):
-        self.layer = layer
+    def __init__(self, cell, output_length, **kwargs):
+        super().__init__(**kwargs)
+
+        self.cell = cell
+
+        if output_length < 1:
+            raise ValueError(
+                'Output length must be at least 1',
+            )
         self.output_length = output_length
+
+    def __call__(self, x):
+        
+        init_state = self.layer.get_initial_state()
+
+
+
+    def get_output_shape_for(self, input_shape):
+        base_output_shape = self.layer.get_output_shape_for(input_shape)
+        return (self.output_length,) + base_output_shape
+
 
 
 # ACTIVATIONS
