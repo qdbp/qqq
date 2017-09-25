@@ -135,7 +135,7 @@ def test_fifo_worker():
     for i in test_arr:
         assert fifw.emit() == i + i
 
-    with pytest.raises(Empty):
+    with pytest.raises(qio.PipeWorker.EmptyEmit):
         fifw.emit()
 
     def bar(a):
@@ -154,20 +154,19 @@ def test_fifo_worker():
 def test_work_pipe():
 
     int_q = qio.iterable_to_q(range(20))
+
     def foo(x):
+        print('foo called with', x)
         return -x if x % 2 else None
 
     worker = qio.FIFOWorker(foo)
 
     wp = qio.WorkPipe(
         'test', input_q=int_q,
-        worker=worker, eager_absorb=True, output_limit=3,
+        worker=worker, output_limit=3,
     )
     wp.run()
     time.sleep(0.1)
-
-    assert int_q.empty()
-    assert wp.output_q.qsize() == 3
 
     for i in [-i for i in range(20) if i % 2]:
         assert wp.output_q.get(timeout=0.02) == i
