@@ -8,7 +8,7 @@
 #include <X11/Xlib.h>
 
 static char module_docstring[] =
-    "C extensions of the qqq library.";
+    "C extensions of the vnv library.";
 
 static PyObject *get_rgb_screen(PyObject*, PyObject*);
 static char get_rgb_screen_doc[] =

@@ -1,14 +1,12 @@
 import concurrent.futures as cfu
 import os
-import os.path as osp
 from abc import abstractmethod
 from collections import defaultdict
-from typing import Optional
 
 import click as clk
 import keras.backend as K
-import keras.callbacks as kcb
-import keras.layers as kr
+import keras.callbacks as kc
+import keras.layers as kl
 import matplotlib.collections as mplc
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mtick
@@ -17,8 +15,9 @@ import numpy.random as npr
 from colored import attr, fg
 from keras.callbacks import Callback
 from keras.datasets import mnist
-from keras.utils import to_categorical
+from keras.engine.topology import Layer
 from keras.models import Model
+from keras.utils import to_categorical
 from tqdm import tqdm
 
 from .qlog import get_logger
@@ -31,16 +30,8 @@ JSON_EXT = 'json'
 PNG_EXT = 'png'
 
 
-# LOSSES AND METRICS
-def f2_crossentropy(yt, yp):
-    '''
-    Biased binary crossentropy, favouring recall.
-    '''
-    yp = K.clip(yp, K.epsilon(), 1 - K.epsilon())
-    return K.mean(-(2 * yt * K.log(yp) + (1 - yt) * K.log(1 - yp)))
-
-
 # MODEL CONSTRUCTION
+
 def apply_layers(inp, *stacks, td=False):
     '''
     Applies the Keras layers in the list of stacks sequentially to the input.
@@ -55,7 +46,7 @@ def apply_layers(inp, *stacks, td=False):
     for stack in stacks:
         for layer in stack:
             for i in range(td):
-                layer = kr.TimeDistributed(layer)
+                layer = kl.TimeDistributed(layer)
             y = layer(y)
     return y
 
@@ -81,10 +72,6 @@ def compile_model(
     return m
 
 
-def shuffle_weights(weights):
-    return [npr.permutation(w.flat).reshape(w.shape) for w in weights]
-
-
 def get_callbacks(
         name, *, pat_stop=9, pat_lr=3, plot=False, val=True,
         epochs=50, base_lr=0.001):
@@ -97,17 +84,17 @@ def get_callbacks(
     os.makedirs('./logs/', exist_ok=True)
 
     out = [
-        kcb.ModelCheckpoint(
+        kc.ModelCheckpoint(
             f'./weights/{name}.hdf5', save_best_only=True, monitor=monitor),
         ValLossPP(),
         KQLogger(name),
-        kcb.CSVLogger(f'./logs/{name}.csv'),
-        # kcb.ReduceLROnPlateau(
+        kc.CSVLogger(f'./logs/{name}.csv'),
+        # kc.ReduceLROnPlateau(
         #     patience=pat_lr, factor=1/np.e, monitor=monitor),
         # linear lr schedule
-        kcb.LearningRateScheduler(
+        kc.LearningRateScheduler(
             lambda epoch:  base_lr * (1 - epoch / epochs)),
-        kcb.EarlyStopping(patience=pat_stop, monitor=monitor),
+        kc.EarlyStopping(patience=pat_stop, monitor=monitor),
     ]
 
     if plot:
@@ -116,31 +103,11 @@ def get_callbacks(
     return out
 
 
-# DATA
-def standard_mnist(flatten=True, featurewise_norm=True):
-    (Xt, yt), (Xv, yv) = mnist.load_data()
-
-    Xt = Xt.reshape(Xt.shape[0],
-                    -1 if flatten else Xt.shape[1:]).astype(np.float32)
-    Xv = Xv.reshape(Xv.shape[0],
-                    -1 if flatten else Xv.shape[1:]).astype(np.float32)
-
-    if featurewise_norm:
-        m = np.mean(Xt, axis=0)
-    else:
-        m = np.mean(Xt)
-    s = np.std(Xt)
-
-    Xt = (Xt - m) / s
-    Xv = (Xv - m) / s
-
-    yt = to_categorical(yt)
-    yv = to_categorical(yv)
-
-    return (Xt, yt), (Xv, yv)
+def shuffle_weights(weights):
+    return [npr.permutation(w.flat).reshape(w.shape) for w in weights]
 
 
-# TODO: probably
+# TODO
 class KProject:
 
     def __init__(self):
@@ -165,6 +132,7 @@ class KProject:
             arch.train()
 
 
+# TODO
 class KArch:
 
     def __init__(
@@ -197,6 +165,33 @@ class KArch:
             log_fn = f'./hyp_search_{self.name}.csv'
         pass
 
+
+# DATA
+
+def standard_mnist(flatten=True, featurewise_norm=True):
+    (Xt, yt), (Xv, yv) = mnist.load_data()
+
+    Xt = Xt.reshape(Xt.shape[0],
+                    -1 if flatten else Xt.shape[1:]).astype(np.float32)
+    Xv = Xv.reshape(Xv.shape[0],
+                    -1 if flatten else Xv.shape[1:]).astype(np.float32)
+
+    if featurewise_norm:
+        m = np.mean(Xt, axis=0)
+    else:
+        m = np.mean(Xt)
+    s = np.std(Xt)
+
+    Xt = (Xt - m) / s
+    Xv = (Xv - m) / s
+
+    yt = to_categorical(yt)
+    yv = to_categorical(yv)
+
+    return (Xt, yt), (Xv, yv)
+
+
+# CALLBACKS
 
 class HypergradientScheduler(Callback):
     '''
@@ -433,3 +428,49 @@ class LiveLossPlot(Callback):
     def on_train_end(self, logs):
         self.fig.canvas.draw()
         self.fig.savefig(f'./plots/{self.name}.svg')
+
+
+# LAYERS
+
+class NegGrad(Layer):
+
+    def __init__(self, *, lbd, **kwargs):
+        super().__init__(**kwargs)
+        self._lbd = lbd
+
+    def build(self, input_shape):
+        self.lbd = self.add_weight(
+                'lbd', (1,), trainable=False,
+                initializer=lambda x: self._lbd,
+            )
+
+    def call(self, x, mask=None):
+        return (1 + self.lbd) * K.stop_gradient(x) - self.lbd * x
+
+    def get_output_shape_for(self, input_shape):
+        return input_shape
+
+    def set_lbd(self, lbd):
+        self.lbd.set_value(lbd)
+
+    def get_config(self):
+        config = {
+            'lbd': float(self.lbd.get_value()),
+        }
+        config.update(super().get_config())
+        return config
+
+
+# ACTIVATIONS
+
+def negabs(x):
+    return -K.abs(x)
+
+
+# LOSSES AND METRICS
+def f2_crossentropy(yt, yp):
+    '''
+    Biased binary crossentropy, favouring recall.
+    '''
+    yp = K.clip(yp, K.epsilon(), 1 - K.epsilon())
+    return K.mean(-(2 * yt * K.log(yp) + (1 - yt) * K.log(1 - yp)))

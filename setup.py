@@ -1,7 +1,8 @@
 from setuptools import setup
 
 
-__version__ = '0.3.1506617524'
+# semver with automatic minor bumps keyed to unix time
+__version__ = '0.3.1506618670'
 
 
 if __name__ == '__main__':
