@@ -1,7 +1,7 @@
 from setuptools import setup
 
 
-__version__ = 0.3.1506615924
+__version__ = '0.3.1506617524'
 
 
 if __name__ == '__main__':
