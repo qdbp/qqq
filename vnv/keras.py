@@ -20,7 +20,7 @@ from keras.models import Model
 from keras.utils import to_categorical
 from tqdm import tqdm
 
-from .qlog import get_logger
+from .log import get_logger
 from .util import as_list
 
 LOG = get_logger(__file__)

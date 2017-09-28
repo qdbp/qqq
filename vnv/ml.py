@@ -5,7 +5,7 @@ import numpy as np
 import numpy.random as npr
 
 from .util import as_list, check_all_same_length
-from .qlog import get_logger
+from .log import get_logger
 
 
 LOG = get_logger(__name__)

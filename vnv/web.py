@@ -21,7 +21,7 @@ from tldextract import extract as tldx
 
 from .io import ConcurrentProcessor as CP, QueueReader
 from .io import Controller, FIFOWorker, PipeWorker, PoolThrottle, QueueTee
-from .qlog import get_logger
+from .log import get_logger
 from .util import ensure_type
 
 URL = NewType('URL', str)

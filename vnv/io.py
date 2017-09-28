@@ -18,7 +18,7 @@ from typing import (Any, Callable, Dict, Iterable, List, Optional,
                     Tuple, TypeVar, Generic, Union, Deque, Iterator)
 
 import pdb
-from .qlog import get_logger
+from .log import get_logger
 from .util import ensure_type
 
 LOG = get_logger(__file__)
