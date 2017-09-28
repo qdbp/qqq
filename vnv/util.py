@@ -1,18 +1,22 @@
-from functools import namedtuple
-from collections.abc import Mapping, Sequence, Iterable
-from functools import wraps
-from inspect import signature, Parameter
 import os.path as osp
 import pickle
-import time
-from threading import Lock
-from typing import Generic, TypeVar
-
+from collections import Counter
+from collections.abc import Mapping, Sequence
+from functools import namedtuple, wraps
+from inspect import Parameter, signature
+from time import sleep, time
+from typing import Dict, Generic, Optional, Counter as CounterT
 
 PrioTup = namedtuple('PrioTup', ('prio', 'value'))
 
 
 def ensure_type(obj, t, *args, **kwargs):
+    '''
+    Validate that `obj` is an object of type `t`.
+
+    If `obj` is None, the constructor `t` is called with *args, *kwargs.
+    '''
+
     if obj is None:
         return t(*args, **kwargs)
     elif not isinstance(obj, t):
@@ -105,6 +109,16 @@ def pickled(fn, func, *args, **kwargs):
     return out
 
 
+def save_pickle(obj, name):
+    with open(f'{name}.p', 'wb') as f:
+        pickle.dump(obj, f)
+
+
+def load_pickle(name):
+    with open(f'{name}.p', 'rb') as f:
+        return pickle.load(f)
+
+
 class UQLError(Exception): pass  # noqa
 
 
@@ -167,72 +181,81 @@ def uql(d, k, default=None):
         )
 
 
-class LockedRef:
-
-    def __init__(self, obj, lock):
-        self.obj = obj
-        self.lock = lock
-
-    def __del__(self):
-        self.lock.release()
-
-    def __getattr__(self, key):
-        return getattr(self.obj, key)
-
-
-class Sync:
+class Stopwatch:
     '''
-    Class to transparently syncrhonize access to an object.
+    Convenience class for timing operations.
 
-    Uses the descriptor protocol to return an exclusive reference wrapper
-    which blocks attribute lookup until it is destroyed.
+    Can track a number of timers, identified by strings keys, in parallel.
     '''
-
-    def __init__(self, obj):
-        self.obj = obj
-        self._lock = Lock()
-
-    def __get__(self, obj, cls):
-        self._lock.acquire()
-
-        return LockedRef(self.obj, self._lock)
-
-    def __set__(self, obj, val):
-        with self._lock():
-            self.obj = val
-
-
-class Timer():
-    def __init__(self):
-        self.mark = None
-
-    def set(self):
-        self.mark = time.time()
-
     @property
-    def now(self):
-        return time.time()
+    @classmethod
+    def now(cls):
+        '''
+        Returns the current time.
 
-    @property
-    def elapsed(self):
-        if self.mark is None:
-            raise ValueError("mark not set")
-        return time.time() - self.mark
+        Convenience method to avoid explicit imports of `time`.
+        '''
+        return time()
 
-    @property
-    def lap(self):
-        if self.mark is None:
-            raise ValueError("mark not set")
-        t = time.time()
-        d = t - self.mark
-        self.mark = t
-        return d
+    def __init__(self) -> None:
+        self.marks: Dict[Optional[str], float] = {}
+        self.dts: Dict[Optional[str], float] = {}
 
-    def clear(self):
-        self.mark = None
+    def is_set(self, key: str=None):
+        return self.marks[key] is not None
+
+    def set(self, key: str=None) -> None:
+        '''
+        (Re)sets the timer identified by `key`.
+        '''
+        self.marks[key] = time()
+
+    def elapsed(self, key=None) -> float:
+        '''
+        Returns the time elapsed since the key was set.
+        '''
+        if self.marks[key] is None:
+            raise ValueError(f"Mark for key {key} was not set")
+        return time() - self.marks[key]
+
+    def lap(self, key: str=None) -> float:
+        '''
+        Returns the time elapsed since the last time the key was set,
+        and sets the key.
+        '''
+        elapsed = self.elapsed(key)
+        self.set(key)
+        return elapsed
+
+    def clear(self, key=None):
+        del self.marks[key]
 
     def sleep(self, t):
-        time.sleep(t)
+        '''
+        Convenience wrapper around time.sleep()
+        '''
+        sleep(t)
 
     def wait(self, until):
-        time.sleep(until - time.time())
+        dt = until - time()
+        if dt <= 0.:
+            return
+        sleep(dt)
+
+
+# class RateCounter:
+#     '''
+#     Class for keeping temporal statistics for events.
+#     '''
+# 
+#     def __init__(self):
+#         self._counter: CounterT[str] = Counter()
+#         self._stopwatch: Stopwatch()
+# 
+#     def register(self, key):
+#         self._counter[key] = 0
+# 
+# 
+#     def fire(self, key: str) -> None:
+#         self._counter[str] += 1
+# 
