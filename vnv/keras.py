@@ -470,16 +470,22 @@ class LiveLossPlot(Callback):
 # LAYERS
 
 class NegGrad(Layer):
+    '''
+    Inverts gradient flow, scalding by an adjustable parameter.
+    '''
 
     def __init__(self, lbd, **kwargs):
         super().__init__(**kwargs)
+        if lbd < 0:
+            raise ValueError('lbd must be nonnegative.')
         self._lbd = lbd
 
     def build(self, input_shape):
         self.lbd = self.add_weight(
                 'lbd', (1,), trainable=False,
-                initializer=lambda x: self._lbd,
+                initializer=lambda x: K.variable(self._lbd),
             )
+        self.built = True
 
     def call(self, x, mask=None):
         return (1 + self.lbd) * K.stop_gradient(x) - self.lbd * x
