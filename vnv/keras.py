@@ -54,19 +54,54 @@ def apply_layers(inp, *stacks, td=False):
 def compile_model(
         i, y, *,
         loss='categorical_crossentropy',
+        losses=None,
         optimizer='nadam',
         metrics=None):
+    '''
+    Compiles a keras model with sensible defaults.
 
-    if loss == 'cxe':
-        loss = 'categorical_crossentropy'
-    if loss == 'bxe':
-        loss = 'binary_crossentropy'
+    Arguments:
+        i:
+            The input tensor(s).
+        y:
+            The output tensor(s).
+        loss:
+            The primary loss to use. Of the same form as accepted by
+            `Model.compile`. Understands the following shorthand:
+                cxe -> categorical_crossentropy
+                bxe -> binary_crossentropy
+        losses:
+            Auxiliary loss tensors to add to the model with `add_loss`.
+        optimizer:
+            The optimizer to use. Of the same form as accepted by
+            `Model.compile`.
+        metrics:
+            The metrics to use. Of the same form as accepted by
+            `Model.compile`. Understands the following shorthand:
+                acc -> categorical_accuracy
+                bacc -> binary_accuracy
+    '''
+
+    loss_map = {
+        'cxe': 'categorical_crossentropy',
+        'bxe': 'categorical_crossentropy',
+    }
+    loss = loss_map.get(loss, loss)
+    losses = as_list(losses)
+
+    metric_map = {
+        'acc': 'categorical_accuracy',
+        'bacc': 'binary_accuracy',
+    }
+    metrics = [metric_map.get(m, m) for m in as_list(metrics)]
 
     i = as_list(i)
     y = as_list(y)
-
-    metrics = metrics or []
     m = Model(inputs=i, outputs=y)
+
+    for aux_loss in losses:
+        m.add_loss(aux_loss)
+
     m.compile(loss=loss, optimizer=optimizer, metrics=metrics)
 
     return m
