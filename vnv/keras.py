@@ -82,26 +82,28 @@ def compile_model(
                 bacc -> binary_accuracy
     '''
 
+    def _rectify(inp, tr_dict):
+        if not isinstance(inp, dict):
+            return [tr_dict.get(x, x) for x in as_list(inp)]
+        else:
+            return {k: tr_dict.get(v, v) for k, v in inp.items()}
+
     loss_map = {
         'cxe': 'categorical_crossentropy',
         'bxe': 'categorical_crossentropy',
     }
-    loss = loss_map.get(loss, loss)
+    loss = _rectify(loss, loss_map)
     losses = as_list(losses)
 
     metric_map = {
         'acc': 'categorical_accuracy',
         'bacc': 'binary_accuracy',
     }
-    metrics = [metric_map.get(m, m) for m in as_list(metrics)]
+    metrics = _rectify(metrics, metric_map)
 
-    i = as_list(i)
-    y = as_list(y)
-    m = Model(inputs=i, outputs=y)
-
+    m = Model(inputs=as_list(i), outputs=as_list(y))
     for aux_loss in losses:
         m.add_loss(aux_loss)
-
     m.compile(loss=loss, optimizer=optimizer, metrics=metrics)
 
     return m
