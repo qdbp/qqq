@@ -1,4 +1,5 @@
 import concurrent.futures as cfu
+from functools import lru_cache
 import os
 from abc import abstractmethod
 from collections import defaultdict
@@ -110,7 +111,7 @@ def compile_model(
 
 
 def get_callbacks(
-        name, *, pat_stop=9, pat_lr=3, plot=False, val=True,
+        name, *, pat_stop=15, pat_lr=3, plot=False, val=True,
         epochs=50, base_lr=0.001):
     '''
     Returns some sensible default callbacks for Keras model training.
@@ -264,7 +265,18 @@ class KQLogger(Callback):
 
 class ValLossPP(Callback):
 
-    compare_more = {'categorical_accuracy', 'binary_accuracy'}
+    compare_more = {'accuracy'}
+
+    @classmethod
+    @lru_cache(maxsize=None)
+    def is_compare_more(cls, key):
+        '''
+        Returns True for keys where more is better.
+        '''
+        for cm in cls.compare_more:
+            if cm in key:
+                return True
+        return False
 
     def __init__(self):
         self.best_val_loss = {}
@@ -303,9 +315,9 @@ class ValLossPP(Callback):
                     self.best_val_loss[key] = val
                     greens.add(key)
 
-                elif ((key[4:] in self.compare_more and
-                        val > self.best_val_loss[key]) or (
-                        key[4:] not in self.compare_more and
+                elif ((self.is_compare_more(key) and
+                       val > self.best_val_loss[key]) or
+                      (not self.is_compare_more(key) and
                         val < self.best_val_loss[key])):
                     greens.add(key)
                     self.best_val_loss[key] = val
@@ -498,7 +510,7 @@ class NegGrad(Layer):
 
     def get_config(self):
         config = {
-            'lbd': float(self.lbd.get_value()),
+            'lbd': float(K.get_value(self.lbd)),
         }
         config.update(super().get_config())
         return config

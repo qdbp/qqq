@@ -36,24 +36,39 @@ class VNVFormatter(lgg.Formatter):
         return prefix + f'{3600*t.tm_hour + 60*t.tm_min + t.tm_sec:05d}'
 
 
-@lru_cache(maxsize=None)
 def fun_from_frame(frame):
+    '''
+    Find the function object corresponding to a frame of code.
+
+    A fairly expensive operation, since the entire object table needs to
+    be looked at.
+    '''
     for o in gc.get_objects():
-        if inspect.isfunction(o) and o.__code__ is frame.f_code:
-            return o
+        try:
+            if inspect.isfunction(o) and o.__code__ is frame.f_code:
+                return o
+        except ReferenceError:
+            continue
 
 
 class VNVLogger(lgg.Logger):
+
+    _code_to_fun = {}  # type: ignore
 
     def verbose(self, msg, *args, **kwargs):
         if self.isEnabledFor(VERBOSE):
             self._log(VERBOSE, msg, args, **kwargs)
 
     def _log(self, level, msg, args, **kwargs):
-        # _log -> info, etc. -> true caller
         try:
+            # _log -> info, etc. -> true caller
             frame = inspect.currentframe().f_back.f_back  # type: ignore
-            fun = fun_from_frame(frame)
+            code = frame.f_code
+            if code in self._code_to_fun:
+                fun = self._code_to_fun[code]
+            else:
+                fun = fun_from_frame(frame)
+                self._code_to_fun[code] = fun
         except AttributeError:
             fun = None
 
