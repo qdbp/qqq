@@ -469,7 +469,7 @@ class LiveLossPlot(Callback):
 
 class NegGrad(Layer):
 
-    def __init__(self, *, lbd, **kwargs):
+    def __init__(self, lbd, **kwargs):
         super().__init__(**kwargs)
         self._lbd = lbd
 
