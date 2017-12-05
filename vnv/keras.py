@@ -53,9 +53,9 @@ def apply_layers(inp, *stacks, td=False):
 
 
 def compile_model(
-        i, y, *,
-        loss='categorical_crossentropy',
-        losses=None,
+        x, y, *,
+        loss='cxe',
+        aux_losses=None,
         optimizer='nadam',
         metrics=None):
     '''
@@ -83,18 +83,35 @@ def compile_model(
                 bacc -> binary_accuracy
     '''
 
-    def _rectify(inp, tr_dict):
-        if not isinstance(inp, dict):
-            return [tr_dict.get(x, x) for x in as_list(inp)]
+    outputs = as_list(y)
+    inputs = as_list(x)
+
+    def _rectify(arg, tr_dict):
+
+        if arg is None:
+            return None
+
+        if not isinstance(arg, dict):
+            arg = as_list(arg)
+
+            if len(arg) == 1:
+                arg = arg * len(outputs)
+
+        if len(arg) != len(outputs):
+            raise ValueError(
+                'Number of losses doesn\'t match the number of outputs')
+
+        if not isinstance(arg, dict):
+            return [tr_dict.get(x, x) for x in arg]
         else:
-            return {k: tr_dict.get(v, v) for k, v in inp.items()}
+            return {k: tr_dict.get(v, v) for k, v in arg.items()}
 
     loss_map = {
         'cxe': 'categorical_crossentropy',
         'bxe': 'categorical_crossentropy',
     }
     loss = _rectify(loss, loss_map)
-    losses = as_list(losses)
+    losses = as_list(aux_losses)
 
     metric_map = {
         'acc': 'categorical_accuracy',
@@ -102,7 +119,7 @@ def compile_model(
     }
     metrics = _rectify(metrics, metric_map)
 
-    m = Model(inputs=as_list(i), outputs=as_list(y))
+    m = Model(inputs=inputs, outputs=outputs)
     for aux_loss in losses:
         m.add_loss(aux_loss)
     m.compile(loss=loss, optimizer=optimizer, metrics=metrics)
@@ -131,7 +148,7 @@ def get_callbacks(
         #     patience=pat_lr, factor=1/np.e, monitor=monitor),
         # linear lr schedule
         kc.LearningRateScheduler(
-            lambda epoch:  base_lr * (1 - epoch / epochs)),
+            lambda epoch: base_lr * (1 - epoch / epochs)),
         kc.EarlyStopping(patience=pat_stop, monitor=monitor),
     ]
 
@@ -143,65 +160,6 @@ def get_callbacks(
 
 def shuffle_weights(weights):
     return [npr.permutation(w.flat).reshape(w.shape) for w in weights]
-
-
-# TODO
-class KProject:
-
-    def __init__(self):
-        self.archs = {}
-
-    def add_architecture(self, name: str, arch: "KArch"):
-        self.archs[name] = arch
-
-    def add_writer(self, writer):
-        self.writer = writer
-
-    @clk.command
-    @clk.argument('arch_name')
-    @clk.option('--test')
-    def execute(self, arch_name, * test):
-        arch = self.archs[arch_name]
-        arch.build()
-
-        if test:
-            arch.test()
-        else:
-            arch.train()
-
-
-# TODO
-class KArch:
-
-    def __init__(
-            self,
-            name: str,
-            f_build_model, f_evaluate_model, f_predict_model):
-        self.name = name
-        self.model = None
-
-    @abstractmethod
-    def build(self, **hyp):
-        '''
-        Create and compile the keras model.
-        '''
-
-    @abstractmethod
-    def train(self, X, y=None, sample_weight=None, class_weight=None):
-        '''
-        Trains the model.
-        '''
-
-    @abstractmethod
-    def evaluate(self, X):
-        '''
-        Evaluates the model.
-        '''
-
-    def hyp_search(self, hyps, log_fn=None):
-        if log_fn is None:
-            log_fn = f'./hyp_search_{self.name}.csv'
-        pass
 
 
 # DATA
@@ -494,9 +452,9 @@ class NegGrad(Layer):
 
     def build(self, input_shape):
         self.lbd = self.add_weight(
-                'lbd', (1,), trainable=False,
-                initializer=lambda x: K.variable(self._lbd),
-            )
+            'lbd', (1,), trainable=False,
+            initializer=lambda x: K.variable(self._lbd),
+        )
         self.built = True
 
     def call(self, x, mask=None):

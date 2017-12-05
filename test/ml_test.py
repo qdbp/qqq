@@ -40,12 +40,16 @@ def test_generate_batches():
     assert np.allclose(xb['x'], yb['y'])
     assert np.any(xb['x'][:-1] > xb['x'][1:])
 
+    # SEQUENTIAL
     g = generate_batches(x, y=y, sequential=True, bs=200)
     xb, yb = next(g)
 
+    # tandmeness
     assert np.allclose(xb['x'], yb['y'])
+    # sequentiality
     assert np.allclose(xb['x'][100:200], x['x'][100:200])
 
+    # WEIGHTS
     sw = np.ones(500)
     sw[::2] = 0
 
@@ -53,6 +57,13 @@ def test_generate_batches():
     xb = next(g)
 
     assert np.allclose(xb['x'] % 2, 1.)
+
+    # BOUND IXES
+    x = np.arange(500)[:, None]
+    g = generate_batches({'x': x}, bound_ixes=np.arange(0, 500, 3))
+    xb = next(g)
+    assert np.allclose(next(g)['x'] % 3, 0.)
+    assert not np.allclose(xb['x'], next(g)['x'])
 
 
 def test_batch_transformer():

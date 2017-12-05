@@ -161,7 +161,7 @@ def generate_batches(
     if bound_ixes is None:
         ix_arange = np.arange(raw_n_samples, dtype=np.uint64)
     else:
-        ix_arange = np.array(bound_ixes)
+        ix_arange = np.asarray(bound_ixes)
     n_samples = len(ix_arange)
 
     # explicit weights overrde balancing
