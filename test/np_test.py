@@ -5,7 +5,7 @@ import numpy as np
 
 
 def test_slarr():
-    from qqq.np import sl_window, unsl_window
+    from vnv.np import sl_window, unsl_window
 
     x1 = np.linspace(0, 5, num=6)
     x2 = np.linspace(0, 50, num=6)
@@ -99,22 +99,3 @@ def test_slarr():
 
     for t in [t1, t2, t3]:
         assert np.allclose(unsl_window(t), arr)
-
-
-def test_tandems():
-    from qqq.np import tandem_shuffle, tandem_resample
-
-    a = list(range(10))
-    b = tuple(range(10))
-
-    sa, sb = tandem_shuffle(a, b)
-    qa, qb = tandem_resample(a, b)
-
-    assert isinstance(sb, np.ndarray)
-    assert np.allclose(sa, sb)
-    assert np.allclose(qa, qb)
-
-    c = list(range(9))
-
-    with pytest.raises(ValueError):
-        sa, sc = tandem_shuffle(a, c)

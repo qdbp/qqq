@@ -4,6 +4,8 @@ import numpy.random as npr
 
 from .np import hilbert_ixes
 
+from .cx.screenshot import screenshot as screenshot
+
 
 def subpixel_shift(img_arr, dx=0.5, inplace=True):
     '''

@@ -1,14 +1,15 @@
 #include <stdlib.h>
 #include <stdio.h>
 
-#include <FLIF/flif.h>
 #include <python3.6m/Python.h>
 #include <numpy/arrayobject.h>
 #include <X11/X.h>
 #include <X11/Xlib.h>
 
+#define NPY_NO_DEPRECATED_API
+
 static char module_docstring[] =
-    "C extensions of the vnv library.";
+    "C extension allowing screenshot capture at the native level.";
 
 static PyObject *get_rgb_screen(PyObject*, PyObject*);
 static char get_rgb_screen_doc[] =
@@ -21,31 +22,23 @@ static char get_rgb_screen_doc[] =
     "Returns:\n"\
     "   arr: (dh, dw, 4) numpy int8 array. Last dimension is (b,g,r,a)";
 
-static char read_flif_as_rgbarray_doc[] = 
-    "Reads a flif file to an RGB array.\n"\
-    "Args:\n"\
-    "   fn: filename of flif file\n"\
-    "Returns:\n"\
-    "   rgb_arr: numpy array of shape (h, w, 3), dtype uint8 containing\n"\
-    "       the 8-bit color depth image data.\n";
-
-static PyMethodDef qqc_methods[] = {
+static PyMethodDef screenshot_methods[] = {
     { "get_rgb_screen", get_rgb_screen, METH_VARARGS, get_rgb_screen_doc},
     {NULL, NULL, 0, NULL} /* Sentinel */
 };
 
-static struct PyModuleDef qqc_module = {
+static struct PyModuleDef screenshot_module = {
    PyModuleDef_HEAD_INIT,
-   "qqc",
+   "screenshot",
    module_docstring,
    -1,
-   qqc_methods
+   screenshot_methods
 };
 
 PyMODINIT_FUNC
-PyInit_qqc(void) {
+PyInit_screenshot(void) {
     import_array();
-    return PyModule_Create(&qqc_module);
+    return PyModule_Create(&screenshot_module);
 };
 
 static PyObject*

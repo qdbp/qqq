@@ -59,60 +59,6 @@ def unsl_window(a):
     return a.base.base
 
 
-def _tandem(mode, *args, rs=None):
-    if not args:
-        return ()
-
-    if len({len(a) for a in args}) > 1:
-        raise ValueError('arrays must be of the same length for tandem ops')
-
-    args = [np.asarray(a) for a in args]
-    l = len(args[0])
-
-    with Lock():
-        if rs:
-            npr.set_state(rs)
-
-        if mode == 'shuffle':
-            ixes = npr.permutation(l)
-        elif mode == 'resample':
-            ixes = npr.randint(l, size=l)
-        else:
-            raise ValueError('invalid mode in _tandem')
-
-    return tuple(arr[ixes] for arr in args)
-
-
-def tandem_shuffle(*args, rs=None):
-    ''' Shuffles a collection of arrays in tandem.
-
-        Given a sequence of arrays, shuffles
-        each to the same permutation, so that
-        elements at a given index in each array
-        stay aligned after shuffling.
-
-        Args:
-            *args: array-likes of the same length
-            rs: random state to shuffle by. If None, uses the current.
-    '''
-
-    return _tandem('shuffle', *args, rs=rs)
-
-
-def tandem_resample(*args, rs=None):
-    ''' Chooses the same random subset from a collection of arrays.
-
-        Given a sequence of arrays, resamples each with replacement.
-        Equivalent to `zip(*resample(zip(*args)))`
-
-        Args:
-            *args: array-likes of the same length
-            rs: random state to shuffle by. If None, uses the current.
-    '''
-
-    return _tandem('resample', *args, rs=rs)
-
-
 @lru_cache(maxsize=4)
 def hilbert_ixes(width):
     '''

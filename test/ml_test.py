@@ -4,7 +4,7 @@ import numpy.random as npr
 
 
 def test_generate_batches():
-    from qqq.ml import generate_batches
+    from vnv.ml import generate_batches
 
     x1 = np.ones((5, 2, 2))
     x2 = np.ones((5, 5)) * 2
@@ -35,12 +35,12 @@ def test_generate_batches():
     y = {'y': np.arange(500)}
 
     npr.seed(1337)
-    g = generate_batches(x, y, bs=100)
+    g = generate_batches(x, y=y, bs=100)
     xb, yb = next(g)
     assert np.allclose(xb['x'], yb['y'])
     assert np.any(xb['x'][:-1] > xb['x'][1:])
 
-    g = generate_batches(x, y, sequential=True, bs=200)
+    g = generate_batches(x, y=y, sequential=True, bs=200)
     xb, yb = next(g)
 
     assert np.allclose(xb['x'], yb['y'])
@@ -56,7 +56,7 @@ def test_generate_batches():
 
 
 def test_batch_transformer():
-    from qqq.ml import batch_transformer
+    from vnv.ml import batch_transformer
 
     bs = 50
 
@@ -96,6 +96,8 @@ def test_batch_transformer():
     flow1 = batch_transformer(f1, inplace=True)(source_1())
     n, _ = next(flow1)
 
+    print(n)
+
     assert np.allclose(n['x0'], 2.)
     assert np.allclose(n['x1'], 4.)
 
@@ -133,7 +135,7 @@ def test_batch_transformer():
 
 
 def test_dict_tv_split():
-    from qqq.ml import dict_tv_split
+    from vnv.ml import dict_tv_split
 
     bs = 50
 

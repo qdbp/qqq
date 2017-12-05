@@ -1,4 +1,4 @@
-from typing import Dict, List, Set # noqa
+from typing import Dict, List, Set  # noqa
 from warnings import warn
 
 import numpy as np
@@ -131,7 +131,7 @@ def generate_batches(
         x_dict, *, y=None,
         bs=128, balance=False, sequential=False,
         sample_weights=None, bound_ixes=None,
-        ):
+):
     '''
     Generate batches of data from a larger array.
 
@@ -215,10 +215,10 @@ def apply_bts(gen, bts, *, train):
     return gen
 
 
-def batch_transformer( # noqa
-    f, *, inplace: bool, mode='each', get_shape=None,
-    in_keys=None, out_keys=None, out_in_ys=None, pop_in_keys=True,
-    train_only=False):
+def batch_transformer(  # noqa
+        f, *, inplace: bool, mode='each', get_shape=None,
+        in_keys=None, out_keys=None, out_in_ys=None, pop_in_keys=True,
+        train_only=False):
     '''
     Transforms functions over individual samples into functions taking
     batch generators and returning batch generators of transformed data.
@@ -300,10 +300,12 @@ def batch_transformer( # noqa
                     yield xbd
                 continue
 
-            if in_keys is None:
-                # by default, apply transformations to all inputs and no labels
+            # by default, apply transformations to all inputs and no labels
+            if not in_keys:
                 in_keys = [*xbd.keys()]
+
             out_keys = out_keys or in_keys
+
             if in_in_ys is None:
                 in_in_ys = []
                 for in_key in in_keys:

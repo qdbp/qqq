@@ -2,7 +2,7 @@ from pytest import raises
 
 
 def test_check_all_same_length():
-    from qqq.util import check_all_same_length
+    from vnv.util import check_all_same_length
 
     assert check_all_same_length() == 0
     assert check_all_same_length([1, 2, 3], [4, 5, 6])
@@ -17,7 +17,7 @@ def test_check_all_same_length():
 
 
 def test_uql():
-    from qqq.util import uql, UQLError
+    from vnv.util import uql, UQLError
     d = {
         'A': {
             'a': ['A.a.0', 'A.a.1'],
@@ -42,7 +42,7 @@ def test_uql():
 
 
 def test_kws():
-    from qqq.util import sift_kwargs, kwsift
+    from vnv.util import sift_kwargs, kwsift
 
     @sift_kwargs
     def foo(*, b, a=1):
