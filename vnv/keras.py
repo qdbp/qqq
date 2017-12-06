@@ -15,7 +15,6 @@ import numpy as np
 import numpy.random as npr
 from colored import attr, fg
 from keras.callbacks import Callback
-from keras.datasets import mnist
 from keras.engine.topology import Layer
 from keras.models import Model
 from keras.utils import to_categorical
@@ -164,13 +163,27 @@ def shuffle_weights(weights):
 
 # DATA
 
-def standard_mnist(flatten=True, featurewise_norm=True):
-    (Xt, yt), (Xv, yv) = mnist.load_data()
+def data_mnist(**kwargs):
+    from keras.datasets import mnist
+    return normalize_data(mnist.load_data, **kwargs)
 
-    Xt = Xt.reshape(Xt.shape[0],
-                    -1 if flatten else Xt.shape[1:]).astype(np.float32)
-    Xv = Xv.reshape(Xv.shape[0],
-                    -1 if flatten else Xv.shape[1:]).astype(np.float32)
+
+def data_fnist(**kwargs):
+    from keras.datasets import fashion_mnist
+    return normalize_data(fashion_mnist.load_data, **kwargs)
+
+
+def normalize_data(load_func, flatten=False, featurewise_norm=True):
+    (Xt, yt), (Xv, yv) = load_func()
+
+    # we squish to (batch, rest) for non-conv
+    if flatten:
+        Xt = Xt.reshape(Xt.shape[0], -1)
+        Xv = Xv.reshape(Xv.shape[0], -1)
+    # if not, we add a dummy colour channel for conv
+    else:
+        Xt = Xt[..., None]
+        Xv = Xv[..., None]
 
     if featurewise_norm:
         m = np.mean(Xt, axis=0)
@@ -516,53 +529,35 @@ class Residual(kl.Layer):
         return input_shape
 
 
-class SGU(kl.Wrapper):
+class SelfGated(kl.Wrapper):
     '''
-    Self-Gated Unit
-
-    Computes s(X[..., :X.shape[-1] // 2] * W + b) ⊙ X[..., X.shape[-1] // 2:]
+    Creates a parallel instantiation of the wrapped layer (with untied
+    parameters), and applies the copy's sigmoig-activated output as
+    as a multiplicative gate to the output of the original layer.
     '''
 
     def __init__(self, layer, **kwargs):
         self.layer = layer
-        super().__init__(**kwargs)
-
-    def _check_input_shape(self, input_shape):
-        if input_shape[-1] % 2:
-            raise ValueError(
-                'The last dimension of the input must be even'
-            )
+        config = layer.get_config()
+        config['activation'] = 'hard_sigmoid'
+        self.gater = layer.__class__.from_config(config)
+        super().__init__(layer, **kwargs)
 
     def build(self, input_shape):
-        self._check_input_shape(input_shape)
-
-        self.gate_dim = input_shape[-1] // 2
-        self.w_W = self.add_weight(
-            name='W_g',
-            shape=input_shape[:-1] + (self.gate_dim, self.gate_dim),
-            initializer='glorot_uniform',
-            trainable=True,
-        )
-        self.w_b = self.add_weight(
-            name='b_g',
-            shape=self.gate_dim,
-            initializer='zeros',
-            trainable=True,
-        )
+        self.layer.build(input_shape)
+        self.gater.build(input_shape)
 
         super().build(input_shape)
+        self.built = True
 
     def call(self, x):
+        gates = self.gater.call(x)
+        y = self.layer.call(x)
 
-        x_g = x[..., :self.gate_dim]
-        x_o = x[..., self.gate_dim:]
-
-        return K.hard_sigmoid(K.dot(self.w_W, x_g) + self.w_b) * x_o
+        return y * gates
 
     def compute_output_shape(self, input_shape):
-        self._check_input_shape(input_shape)
-
-        return input_shape[:-1] + (self.gate_dim,)
+        return self.layer.compute_output_shape(input_shape)
 
 
 # ACTIVATIONS

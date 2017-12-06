@@ -3,7 +3,7 @@ import numpy.distutils.misc_util as ndist_misc
 
 
 # semver with automatic minor bumps keyed to unix time
-__version__ = '0.6.1512579791'
+__version__ = '0.6.1512585998'
 
 
 cx_mods = [
