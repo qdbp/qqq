@@ -474,6 +474,97 @@ class NegGrad(Layer):
         return config
 
 
+class Residual(kl.Layer):
+
+    def __init__(self, *layers, activation=None, **kwargs):
+        if not layers:
+            raise ValueError('Need at least one layer!')
+        self.layers = layers
+        self.activation = activation
+
+        super().__init__(**kwargs)
+
+    def build(self, input_shape):
+        for layer in self.layers:
+            layer.build(input_shape)
+        super().build(input_shape)
+
+    def call(self, x):
+        y = x
+        for layer in self.layers:
+            y = layer.call(y)
+
+        out = y + x
+
+        if self.activation is not None:
+            out = kl.Activation(self.activation)(out)
+
+        return out
+
+    def compute_output_shape(self, input_shape):
+
+        next_shape = input_shape
+        for layer in self.layers:
+            next_shape = layer.compute_output_shape(next_shape)
+
+        if next_shape != input_shape:
+            raise ValueError(
+                'The layers within a residual block must preserve the shape. '
+                'Had {}, got {}'.format(input_shape, next_shape)
+            )
+
+        return input_shape
+
+
+class SGU(kl.Wrapper):
+    '''
+    Self-Gated Unit
+
+    Computes s(X[..., :X.shape[-1] // 2] * W + b) ⊙ X[..., X.shape[-1] // 2:]
+    '''
+
+    def __init__(self, layer, **kwargs):
+        self.layer = layer
+        super().__init__(**kwargs)
+
+    def _check_input_shape(self, input_shape):
+        if input_shape[-1] % 2:
+            raise ValueError(
+                'The last dimension of the input must be even'
+            )
+
+    def build(self, input_shape):
+        self._check_input_shape(input_shape)
+
+        self.gate_dim = input_shape[-1] // 2
+        self.w_W = self.add_weight(
+            name='W_g',
+            shape=input_shape[:-1] + (self.gate_dim, self.gate_dim),
+            initializer='glorot_uniform',
+            trainable=True,
+        )
+        self.w_b = self.add_weight(
+            name='b_g',
+            shape=self.gate_dim,
+            initializer='zeros',
+            trainable=True,
+        )
+
+        super().build(input_shape)
+
+    def call(self, x):
+
+        x_g = x[..., :self.gate_dim]
+        x_o = x[..., self.gate_dim:]
+
+        return K.hard_sigmoid(K.dot(self.w_W, x_g) + self.w_b) * x_o
+
+    def compute_output_shape(self, input_shape):
+        self._check_input_shape(input_shape)
+
+        return input_shape[:-1] + (self.gate_dim,)
+
+
 # ACTIVATIONS
 
 def negabs(x):
