@@ -12,7 +12,7 @@ import numpy.random as npr
 import pytest
 
 from sklearn.metrics import accuracy_score
-from vnv.keras import data_fnist
+from vnv.keras import data_fnist, apply_layers, compile_model
 
 
 (Xt, yt), (Xv, yv) = data_fnist()
@@ -42,19 +42,29 @@ def test_compile_model():
 
     # TODO aux losses, metrics
 
-
 @pytest.mark.skipif(GIT_PREPUSH, reason='git prepush')
-def test_SelfGated():
+def test_LayerFactory():
 
-    from vnv.keras import SelfGated, compile_model
+    from vnv.keras import LayerFactory
+
+    cfac = LayerFactory('base_conv', kl.Conv2D, 64, (3, 3), activation='relu')
+    fpac = LayerFactory('base_pool', kl.MaxPooling2D, (2, 2))
 
     i = km.Input(Xt.shape[1:])
-    h = SelfGated(kl.Conv2D(64, (3, 3)))(i)
-    f = kl.Flatten()(h)
-    d = kl.Dense(128, activation='relu')(f)
-    y = kl.Dense(yt.shape[-1], activation='softmax')(d)
+    stack = [
+        cfac,
+        fpac,
+        cfac,
+        fpac,
+        kl.Flatten(),
+        kl.Dense(128, activation='relu'),
+        kl.Dense(yv.shape[-1], activation='softmax'),
+    ]
+
+    y = apply_layers(i, stack)
 
     m = compile_model(i, y, loss='cxe', metrics='acc')
+    m.summary()
     m.fit(Xt, yt, epochs=1)
 
     yp = np.argmax(m.predict(Xv), axis=-1)
@@ -63,22 +73,60 @@ def test_SelfGated():
 
 
 @pytest.mark.skipif(GIT_PREPUSH, reason='git prepush')
-def test_Residual():
+def test_Gated():
 
-    from vnv.keras import Residual, compile_model
+    from vnv.keras import Gated, LayerFactory as LF, Stacked
 
-    c0 = kl.Conv2D(64, (3, 3), activation='relu', padding='same')
-    c1 = kl.Conv2D(64, (3, 3), activation='linear', padding='same')
+    f_conv = LF('base_conv', kl.Conv2D, 32, (3, 3), strides=2)
+    # f_pool = LF('base_pool', kl.MaxPooling2D, (2, 2))
 
+    t_gate = Gated(f_conv)
+    # t_gwp = Stacked(t_gate, f_pool)
+    # stk = Stacked(t_gwp, t_gwp, t_gwp)
+    
     i = km.Input(Xt.shape[1:])
-    c = kl.Conv2D(64, (3, 3), activation='relu', padding='same')(i)
-    h = Residual(c0, c1, activation='relu')(c)
-    f = kl.Flatten()(h)
-    d = kl.Dense(128, activation='relu')(f)
-    y = kl.Dense(yt.shape[-1], activation='softmax')(d)
+    
+    y = Stacked(
+        t_gate * 4,
+        kl.Flatten(),
+        kl.Dense(128, activation='relu'),
+        kl.Dense(yt.shape[-1], activation='softmax'),
+    )(i)
 
     m = compile_model(i, y, loss='cxe', metrics='acc')
-    m.fit(Xt, yt, epochs=1)
+    m.summary()
+    m.fit(Xt, yt, epochs=5)
+
+    yp = np.argmax(m.predict(Xv), axis=-1)
+    acc = accuracy_score(np.argmax(yv, axis=-1), yp)
+    assert acc > 0.7
+
+
+@pytest.mark.skipif(GIT_PREPUSH, reason='git prepush')
+def test_Residual():
+
+    from vnv.keras import LayerFactory as LF, Residual, Stacked
+
+    f_conv = LF('base_conv', kl.Conv2D, 64, (3, 3), padding='same', activation='relu')
+    f_pool = LF('base_pool', kl.MaxPooling2D, (2, 2))
+
+    t_base = f_conv * 2
+    t_res = Residual(t_base, activation='relu') + f_pool
+    t_stk = t_res * 2
+
+    i = km.Input(Xt.shape[1:])
+    y = Stacked(
+        t_stk,
+        kl.Flatten(),
+        kl.Dense(128, activation='relu'),
+        kl.Dropout(0.5),
+        kl.Dense(128, activation='relu'),
+        kl.Dense(yt.shape[-1], activation='softmax'),
+    )(i)
+
+    m = compile_model(i, y, loss='cxe', metrics='acc')
+    m.summary()
+    m.fit(Xt, yt, epochs=5)
 
     yp = np.argmax(m.predict(Xv), axis=-1)
     acc = accuracy_score(np.argmax(yv, axis=-1), yp)
@@ -86,4 +134,6 @@ def test_Residual():
 
 
 if __name__ == '__main__':
-    test_Residual()
+    # test_LayerFactory()
+    test_Gated()
+    # test_Residual()

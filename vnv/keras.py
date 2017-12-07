@@ -3,8 +3,10 @@ from functools import lru_cache
 import os
 from abc import abstractmethod
 from collections import defaultdict
+from typing import Iterable, Union
 
 import click as clk
+import keras.activations as ka
 import keras.backend as K
 import keras.callbacks as kc
 import keras.layers as kl
@@ -487,77 +489,157 @@ class NegGrad(Layer):
         return config
 
 
-class Residual(kl.Layer):
+class Template:
+    '''
+    A higher level model building block, based on the formulaic combination
+    of multiple layers.
+    '''
 
-    def __init__(self, *layers, activation=None, **kwargs):
-        if not layers:
-            raise ValueError('Need at least one layer!')
-        self.layers = layers
+    @abstractmethod
+    def __call__(self, x):
+        pass
+
+    def __mul__(self, n):
+        if isinstance(n, int):
+            return Stacked(*([self] * 3))
+        else:
+            raise ValueError
+
+    def __add__(self, t):
+        if isinstance(t, (Template, LayerFactory, kl.Layer)):
+            return Stacked(self, t)
+        else:
+            raise ValueError
+
+    def __or__(self, t):
+        if isinstance(t, (Template, LayerFactory, kl.Layer)):
+            return Parallel(self, t)
+        else:
+            raise ValueError
+
+
+class LayerFactory(Template):
+    '''
+    The simplest template: produces a copy of a single layer.
+    '''
+
+    def __init__(self, name: str, lcls: type, *args, **kwargs) -> None:
+        self.lcls = lcls
+        self.args = args
+        self.kwargs = kwargs
+        self.name = name
+
+        self.kwargs.pop('name', None)
+
+        self._ctr = 0
+        self._instances = {}
+
+    def clone(self, name, **kwargs):
+        new_kwargs = self.kwargs.copy()
+        new_kwargs.update(kwargs)
+        return self.__class__(name, self.lcls, *self.args, **new_kwargs)
+
+    def __call__(self, xs):
+        layer = self.lcls(
+            *self.args,
+            name=(self.name + '_' + str(self._ctr)),
+            **self.kwargs,
+        )
+        self._instances[layer.name] = layer
+        self._ctr += 1
+        return layer(xs)
+
+
+class Parallel(Template):
+
+    def __init__(self, *objs):
+        self.objs = objs
+
+    def __call__(self, x):
+        return [obj(x) for obj in self.objs]
+
+
+class Reduce(Template):
+
+    def __init__(self, merge_fac: LayerFactory) -> None:
+        self.merge_cls = merge_fac
+
+    def __call__(self, *xs):
+        true_xs = []  # type: ignore
+        for x in xs:
+            if isinstance(x, (list, tuple)):
+                true_xs.extend(x)
+            else:
+                true_xs.append(x)
+
+        return self.merge_cls()(true_xs)
+
+
+class Stacked(Template):
+    '''
+    It stacks.
+
+    It asks no questions about what it stacks.
+    '''
+
+    def __init__(self, *objs):
+        self.objs = objs
+
+    def __call__(self, x):
+        print('stacked call')
+        y = x
+        for obj in self.objs:
+            print(y, '->', end='')
+            y = obj(y)
+            print(y)
+        return y
+
+
+class Gated(Template):
+    '''
+    Must be instantiated with a factory.
+
+    On production, instantiates a second product with sigmoid activations.
+    This product is called on the same inputs as the principal, and the
+    principal's output is multiplied by that of the gater.
+    '''
+
+    def __init__(self, factory: LayerFactory) -> None:
+        self.fac = factory.clone(name=factory.name, activation=None)
+        self.gfac = factory.clone(
+            name=factory.name + '_gate', activation='hard_sigmoid')
+
+    def __call__(self, x):
+        g = self.gfac(x)
+        y = self.fac(x)
+
+        return kl.Multiply()([g, y])
+
+
+class Residual(Template):
+    '''
+    Sums the template's output with its own input, and opionally
+    applies an activation to the result.
+    '''
+
+    def __init__(self, *objs, activation=None) -> None:
+        self.objs = objs
         self.activation = activation
 
-        super().__init__(**kwargs)
-
-    def build(self, input_shape):
-        for layer in self.layers:
-            layer.build(input_shape)
-        super().build(input_shape)
-
-    def call(self, x):
+    def __call__(self, x):
+        print('residual call')
         y = x
-        for layer in self.layers:
-            y = layer.call(y)
+        for obj in self.objs:
+            print(y, '->', end='')
+            y = obj(y)
+            print(y)
 
-        out = y + x
+        y = Reduce(kl.Add)(x, y)
 
         if self.activation is not None:
-            out = kl.Activation(self.activation)(out)
+            y = kl.Activation(self.activation)(y)
 
-        return out
-
-    def compute_output_shape(self, input_shape):
-
-        next_shape = input_shape
-        for layer in self.layers:
-            next_shape = layer.compute_output_shape(next_shape)
-
-        if next_shape != input_shape:
-            raise ValueError(
-                'The layers within a residual block must preserve the shape. '
-                'Had {}, got {}'.format(input_shape, next_shape)
-            )
-
-        return input_shape
-
-
-class SelfGated(kl.Wrapper):
-    '''
-    Creates a parallel instantiation of the wrapped layer (with untied
-    parameters), and applies the copy's sigmoig-activated output as
-    as a multiplicative gate to the output of the original layer.
-    '''
-
-    def __init__(self, layer, **kwargs):
-        self.layer = layer
-        config = layer.get_config()
-        config['activation'] = 'hard_sigmoid'
-        self.gater = layer.__class__.from_config(config)
-        super().__init__(layer, **kwargs)
-
-    def build(self, input_shape):
-        self.layer.build(input_shape)
-        self.gater.build(input_shape)
-
-        super().build(input_shape)
-        self.built = True
-
-    def call(self, x):
-        gates = self.gater.call(x)
-        y = self.layer.call(x)
-
-        return y * gates
-
-    def compute_output_shape(self, input_shape):
-        return self.layer.compute_output_shape(input_shape)
+        return y
 
 
 # ACTIVATIONS
