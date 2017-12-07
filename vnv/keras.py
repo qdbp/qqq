@@ -1,3 +1,4 @@
+from collections import Counter
 import concurrent.futures as cfu
 from functools import lru_cache
 import os
@@ -495,13 +496,15 @@ class Template:
     of multiple layers.
     '''
 
+    name_resolver = Counter()
+
     @abstractmethod
     def __call__(self, x):
         pass
 
     def __mul__(self, n):
         if isinstance(n, int):
-            return Stacked(*([self] * 3))
+            return Stacked(*([self] * n))
         else:
             raise ValueError
 
@@ -531,8 +534,7 @@ class LayerFactory(Template):
 
         self.kwargs.pop('name', None)
 
-        self._ctr = 0
-        self._instances = {}
+        self._instances = {}  # type: ignore
 
     def clone(self, name, **kwargs):
         new_kwargs = self.kwargs.copy()
@@ -540,13 +542,17 @@ class LayerFactory(Template):
         return self.__class__(name, self.lcls, *self.args, **new_kwargs)
 
     def __call__(self, xs):
+        index = self.name_resolver[self.name]
+        self.name_resolver[self.name] += 1
+
         layer = self.lcls(
             *self.args,
-            name=(self.name + '_' + str(self._ctr)),
+            name=(self.name + '_' + str(index)),
             **self.kwargs,
         )
+
         self._instances[layer.name] = layer
-        self._ctr += 1
+        
         return layer(xs)
 
 
@@ -655,3 +661,13 @@ def f2_crossentropy(yt, yp):
     '''
     yp = K.clip(yp, K.epsilon(), 1 - K.epsilon())
     return K.mean(-(2 * yt * K.log(yp) + (1 - yt) * K.log(1 - yp)))
+
+
+def r2(yt, yp):
+    m = K.mean(yt)
+
+    ss = K.sum((yt - m) ** 2)
+    sr = K.sum((yt - yp) ** 2)
+
+    return K.mean(1 - (sr + K.epsilon()) / (ss + K.epsilon()))
+
