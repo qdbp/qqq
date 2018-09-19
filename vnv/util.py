@@ -1,37 +1,51 @@
 import os.path as osp
 import pickle
-from collections import Counter
+from collections import defaultdict, namedtuple
 from collections.abc import Mapping, Sequence
-from functools import namedtuple, wraps
+from functools import wraps
 from inspect import Parameter, signature
+import sys
 from time import sleep, time
-from typing import Dict, Generic, Optional, Counter as CounterT
+from typing import Any, Collection, Dict, List, Optional, Sized
 
-PrioTup = namedtuple('PrioTup', ('prio', 'value'))
+PrioTup = namedtuple("PrioTup", ("prio", "value"))
+
+
+def die(msg, code=-1, debug_locals=None):
+    print(msg, file=sys.stderr)
+    if debug_locals:
+        from traceback import print_stack
+        from pprint import pprint
+        print_stack()
+        pprint(debug_locals)
+    sys.exit(code)
 
 
 def ensure_type(obj, t, *args, **kwargs):
-    '''
+    """
     Validate that `obj` is an object of type `t`.
 
     If `obj` is None, the constructor `t` is called with *args, *kwargs.
-    '''
+
+    If `obj` is not None and not an instance of type `t`, ValueError is raised.
+    """
 
     if obj is None:
         return t(*args, **kwargs)
     elif not isinstance(obj, t):
-        raise ValueError(f'need a {t.__name__} object, got {obj}')
+        raise ValueError(f"need a {t.__name__} object, got {obj}")
     else:
         return obj
 
 
-def as_list(obj):
-    '''
-    Ensures output is a list of objects.
+def as_list(obj) -> List[Any]:
+    """
+    Coerces the input into a list.
 
-    Iterables are read into a list, non-iterables are wrapped in a singleton
-    list.
-    '''
+    None is turned into an empty list.
+    Iterables are read into a list.
+    All other objects are wrapped in a singleton list.
+    """
 
     if obj is None:
         return []
@@ -42,18 +56,27 @@ def as_list(obj):
         return [obj]
 
 
+def flatten(xs: List[List[Any]]):
+    """
+    Flattens a list of lists. Does not recurse.
+    """
+    return sum(xs, [])
+
+
 def sift_kwargs(f):
-    '''
+    """
     Lets the wrapped function silently ignore invalid kwargs.
-    '''
+    """
+
     @wraps(f)
     def _f(*args, **kwargs):
         return f(*args, **kwsift(kwargs, f))
+
     return _f
 
 
 def kwsift(kw, f):
-    '''
+    """
     Sifts a keyoword argument dictionary with respect to a function.
 
     Returns a dictionary with those entries that the given function
@@ -62,7 +85,7 @@ def kwsift(kw, f):
     If the function is found to accept a variadic keyword dictionary
     (**kwargs), the first argument is returned unchanged, since any keyword
     argument is therefore legal.
-    '''
+    """
 
     sig = signature(f)
     kw_kinds = {Parameter.KEYWORD_ONLY, Parameter.POSITIONAL_OR_KEYWORD}
@@ -77,53 +100,62 @@ def kwsift(kw, f):
     return out
 
 
-def check_all_same_length(*args, allow_none=False, msg=None):
-    '''
-    Raises ValueError if arguments' lengths differ.
+def check_all_same_length(
+    *args: Sized, allow_none: bool = False, msg: str = None
+) -> int:
+    """
+    Checks that all arguments are the same length.  Raises ValueError if
+    arguments' lengths differ.
 
     Returns arguments' shared length.
-    '''
+    """
     if not args:
         return 0
 
-    s = {
-        len(arg) for arg in args
-        if not allow_none or arg is not None
-    }
+    s = {len(arg) for arg in args if not allow_none or arg is not None}
 
-    if len(s) > 1:
-        raise ValueError(
-            f'arguments have different lengths! {s}\n' + (msg or ''))
+    if len(s) != 1:
+        raise ValueError(f"arguments have different lengths! {s}\n" + (msg or ""))
 
-    return len(args[0])
+    return s.pop()
+
+
+def alleq(xs: Collection) -> bool:
+    """
+    Returns true iff all elements of the Collection `xs` are equal
+    """
+    if len(xs) == 0:
+        return True
+    else:
+        it = iter(xs)
+        x0 = next(it)
+        return all(x == x0 for x in it)
 
 
 def pickled(fn, func, *args, **kwargs):
     if osp.isfile(fn):
-        with open(fn, 'rb') as f:
-            out = pickle.load(f)
-    else:
-        out = func(*args, **kwargs)
-        with open(fn, 'wb') as f:
-            pickle.dump(out, f)
+        return load_pickle(fn)
+    out = func(*args, **kwargs)
+    save_pickle(out, fn)
     return out
 
 
 def save_pickle(obj, name):
-    with open(f'{name}.p', 'wb') as f:
+    with open(f"{name}.p", "wb") as f:
         pickle.dump(obj, f)
 
 
 def load_pickle(name):
-    with open(f'{name}.p', 'rb') as f:
+    with open(f"{name}.p", "rb") as f:
         return pickle.load(f)
 
 
-class UQLError(Exception): pass  # noqa
+class UQLError(Exception):
+    pass  # noqa
 
 
 def uql(d, k, default=None):
-    '''
+    """
     Micro-Query Language.
 
     Dissect nested dicts. Dismember JSON without mercy.
@@ -140,9 +172,9 @@ def uql(d, k, default=None):
     InvalidPathError
     >>> uql(d, 'a.2.3', 'qux')
     "qux"
-    '''
+    """
 
-    key, _, rest = k.partition('.')
+    key, _, rest = k.partition(".")
 
     if isinstance(d, Mapping):
         if key in d:
@@ -164,9 +196,7 @@ def uql(d, k, default=None):
         try:
             ix = int(key)
         except ValueError:
-            raise UQLError(
-                f'bad subkey {key} for subcontainer {d}'
-            )
+            raise UQLError(f"bad subkey {key} for subcontainer {d}")
         if not rest:
             try:
                 return d[ix]
@@ -176,53 +206,52 @@ def uql(d, k, default=None):
             return uql(d[ix], rest, default=default)
 
     else:
-        raise UQLError(
-            f'attempt to get key {key} from terminal value {d}'
-        )
+        raise UQLError(f"attempt to get key {key} from terminal value {d}")
 
 
 class Stopwatch:
-    '''
+    """
     Convenience class for timing operations.
 
     Can track a number of timers, identified by strings keys, in parallel.
-    '''
+    """
+
     @property
     @classmethod
     def now(cls):
-        '''
+        """
         Returns the current time.
 
         Convenience method to avoid explicit imports of `time`.
-        '''
+        """
         return time()
 
     def __init__(self) -> None:
         self.marks: Dict[Optional[str], float] = {}
         self.dts: Dict[Optional[str], float] = {}
 
-    def is_set(self, key: str=None):
+    def is_set(self, key: str = None):
         return self.marks[key] is not None
 
-    def set(self, key: str=None) -> None:
-        '''
+    def set(self, key: str = None) -> None:
+        """
         (Re)sets the timer identified by `key`.
-        '''
+        """
         self.marks[key] = time()
 
     def elapsed(self, key=None) -> float:
-        '''
+        """
         Returns the time elapsed since the key was set.
-        '''
+        """
         if self.marks[key] is None:
             raise ValueError(f"Mark for key {key} was not set")
         return time() - self.marks[key]
 
-    def lap(self, key: str=None) -> float:
-        '''
+    def lap(self, key: str = None) -> float:
+        """
         Returns the time elapsed since the last time the key was set,
         and sets the key.
-        '''
+        """
         elapsed = self.elapsed(key)
         self.set(key)
         return elapsed
@@ -231,9 +260,9 @@ class Stopwatch:
         del self.marks[key]
 
     def sleep(self, t):
-        '''
+        """
         Convenience wrapper around time.sleep()
-        '''
+        """
         sleep(t)
 
     def wait(self, until):
@@ -241,21 +270,3 @@ class Stopwatch:
         if dt <= 0.:
             return
         sleep(dt)
-
-
-# class RateCounter:
-#     '''
-#     Class for keeping temporal statistics for events.
-#     '''
-# 
-#     def __init__(self):
-#         self._counter: CounterT[str] = Counter()
-#         self._stopwatch: Stopwatch()
-# 
-#     def register(self, key):
-#         self._counter[key] = 0
-# 
-# 
-#     def fire(self, key: str) -> None:
-#         self._counter[str] += 1
-# 

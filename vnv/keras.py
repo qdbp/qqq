@@ -1,4 +1,4 @@
-from collections import Counter
+from collections import Counter, deque
 import concurrent.futures as cfu
 from functools import lru_cache
 import os
@@ -490,162 +490,26 @@ class NegGrad(Layer):
         return config
 
 
-class Template:
+class CReLU(Layer):
     '''
-    A higher level model building block, based on the formulaic combination
-    of multiple layers.
-    '''
-
-    name_resolver = Counter()
-
-    @abstractmethod
-    def __call__(self, x):
-        pass
-
-    def __mul__(self, n):
-        if isinstance(n, int):
-            return Stacked(*([self] * n))
-        else:
-            raise ValueError
-
-    def __add__(self, t):
-        if isinstance(t, (Template, LayerFactory, kl.Layer)):
-            return Stacked(self, t)
-        else:
-            raise ValueError
-
-    def __or__(self, t):
-        if isinstance(t, (Template, LayerFactory, kl.Layer)):
-            return Parallel(self, t)
-        else:
-            raise ValueError
-
-
-class LayerFactory(Template):
-    '''
-    The simplest template: produces a copy of a single layer.
+    Concatenated relu activation.
     '''
 
-    def __init__(self, name: str, lcls: type, *args, **kwargs) -> None:
-        self.lcls = lcls
-        self.args = args
-        self.kwargs = kwargs
-        self.name = name
+    def build(self):
+        self.built = True
 
-        self.kwargs.pop('name', None)
+    def calculate_output_shape(self, input_shape):
+        if isinstance(input_shape, list):
+            return NotImplemented
 
-        self._instances = {}  # type: ignore
+        return input_shape[:-1] + (2 * input_shape[-1],)
 
-    def clone(self, name, **kwargs):
-        new_kwargs = self.kwargs.copy()
-        new_kwargs.update(kwargs)
-        return self.__class__(name, self.lcls, *self.args, **new_kwargs)
+    def call(self, x):
 
-    def __call__(self, xs):
-        index = self.name_resolver[self.name]
-        self.name_resolver[self.name] += 1
+        p = K.relu(x)
+        n = K.relu(-x)
 
-        layer = self.lcls(
-            *self.args,
-            name=(self.name + '_' + str(index)),
-            **self.kwargs,
-        )
-
-        self._instances[layer.name] = layer
-        
-        return layer(xs)
-
-
-class Parallel(Template):
-
-    def __init__(self, *objs):
-        self.objs = objs
-
-    def __call__(self, x):
-        return [obj(x) for obj in self.objs]
-
-
-class Reduce(Template):
-
-    def __init__(self, merge_fac: LayerFactory) -> None:
-        self.merge_cls = merge_fac
-
-    def __call__(self, *xs):
-        true_xs = []  # type: ignore
-        for x in xs:
-            if isinstance(x, (list, tuple)):
-                true_xs.extend(x)
-            else:
-                true_xs.append(x)
-
-        return self.merge_cls()(true_xs)
-
-
-class Stacked(Template):
-    '''
-    It stacks.
-
-    It asks no questions about what it stacks.
-    '''
-
-    def __init__(self, *objs):
-        self.objs = objs
-
-    def __call__(self, x):
-        print('stacked call')
-        y = x
-        for obj in self.objs:
-            print(y, '->', end='')
-            y = obj(y)
-            print(y)
-        return y
-
-
-class Gated(Template):
-    '''
-    Must be instantiated with a factory.
-
-    On production, instantiates a second product with sigmoid activations.
-    This product is called on the same inputs as the principal, and the
-    principal's output is multiplied by that of the gater.
-    '''
-
-    def __init__(self, factory: LayerFactory) -> None:
-        self.fac = factory.clone(name=factory.name, activation=None)
-        self.gfac = factory.clone(
-            name=factory.name + '_gate', activation='hard_sigmoid')
-
-    def __call__(self, x):
-        g = self.gfac(x)
-        y = self.fac(x)
-
-        return kl.Multiply()([g, y])
-
-
-class Residual(Template):
-    '''
-    Sums the template's output with its own input, and opionally
-    applies an activation to the result.
-    '''
-
-    def __init__(self, *objs, activation=None) -> None:
-        self.objs = objs
-        self.activation = activation
-
-    def __call__(self, x):
-        print('residual call')
-        y = x
-        for obj in self.objs:
-            print(y, '->', end='')
-            y = obj(y)
-            print(y)
-
-        y = Reduce(kl.Add)(x, y)
-
-        if self.activation is not None:
-            y = kl.Activation(self.activation)(y)
-
-        return y
+        return K.concatenate([n, p], axis=-1)
 
 
 # ACTIVATIONS
@@ -671,3 +535,262 @@ def r2(yt, yp):
 
     return K.mean(1 - (sr + K.epsilon()) / (ss + K.epsilon()))
 
+
+# TEMPLATES
+
+class Template:
+    '''
+    A higher level model building block, based on the formulaic combination
+    of multiple layers.
+    '''
+
+    name_resolver = Counter()
+    name_stack = deque([])
+
+    def __init__(self, name=None, *args, **kwargs):
+        self.name = name
+        self.args = args
+        self.kwargs = kwargs
+
+    # TODO
+    # def clone(self, new_name, *args, **kwargs):
+    #     new_kwargs = self.kwargs.copy(self.kwargs)update(kwargs)
+    #     if args:
+    #         new_args = args
+    #     else:
+    #         new_args = self.args
+
+    #     return self.__class__(*new_args, name=new_name, **new_kwargs)
+
+    def __call__(self, *xs):
+        if self.name is not None:
+            self.__class__.name_stack.append(self.name)
+            try:
+                return self.call(*xs)
+            finally:
+                self.__class__.name_stack.pop()
+        else:
+            return self.call(*xs)
+
+    @abstractmethod
+    def call(self, *xs):
+        '''
+        Applies this template to the keras tensor x.
+        '''
+
+    def __mul__(self, n):
+        if isinstance(n, int):
+            return Stacked(*([self] * n))
+        else:
+            return NotImplemented
+
+    # FIXME use >> << instead
+    def __add__(self, t):
+        if isinstance(t, (Template, kl.Layer)):
+            return Stacked(self, t)
+        else:
+            return NotImplemented
+
+    def __rmul__(self, i):
+        # XXX: this will break if __mul__ implements type overloading
+        return self.__mul__(i)
+
+    def __radd__(self, i):
+        if isinstance(i, (Template, kl.Layer)):
+            return Stacked(i, self)
+        else:
+            return NotImplemented
+
+    def __or__(self, t):
+        if isinstance(t, (Template, kl.Layer)):
+            return Parallel(self, t)
+        else:
+            return NotImplemented
+
+    def __and__(self, t):
+        if isinstance(t, (Template, kl.Layer)):
+            return Reduce(kl.Concatenate, self, t)
+        else:
+            return NotImplemented
+
+    def get_name(self):
+        out = '.'.join(self.__class__.name_stack)
+        index = self.name_resolver[out]
+        self.name_resolver[out] += 1
+        out += '_' + str(index)
+        return out
+
+    def suffix_name(self, name_suffix):
+        class _:
+            def __enter__(inner_self):
+                self.__class__.name_stack.append(name_suffix)
+            def __exit__(inner_self, *_):  # noqa
+                self.__class__.name_stack.pop()
+        return _()
+
+
+class Die(Template):
+    '''
+    The lowest-level template: produces a new instance of a single layer
+    with the parameters given at instantiation of this class.
+    '''
+
+    def __init__(self, name: str, lcls: type, *args, **kwargs) -> None:
+        super().__init__(name)
+        self.lcls = lcls
+        self.args = args
+        self.kwargs = kwargs
+
+        # get rid of an erroneous layer name; layers take the template name
+        self.kwargs.pop('name', None)
+
+        self._instances = {}  # type: ignore
+
+    def clone(self, name, **kwargs):
+        new_kwargs = self.kwargs.copy()
+        new_kwargs.update(kwargs)
+        return self.__class__(name, self.lcls, *self.args, **new_kwargs)
+
+    def call(self, xs):
+        layer = self.lcls(
+            *self.args,
+            name=self.get_name(),
+            **self.kwargs,
+        )
+
+        self._instances[layer.name] = layer
+        
+        return layer(xs)
+
+
+class Parallel(Template):
+
+    def __init__(self, *objs, name=None):
+        super().__init__(name or 'parallel')
+        self.objs = objs
+
+    def call(self, x):
+        return [obj(x) for obj in self.objs]
+
+
+class Reduce(Template):
+
+    def __init__(self, objs, name=None) -> None:
+        super().__init__(name or 'reduce')
+        self.objs = objs
+
+    def call(self, xs):
+        true_ys = []  # type: ignore
+        for obj in self.objs:
+            y = obj(xs)
+            if isinstance(y, (list, tuple)):
+                true_ys.extend(y)
+            else:
+                true_ys.append(y)
+
+        return self.merge_cls(name=self.get_name())(true_ys)
+
+
+class Stacked(Template):
+    '''
+    It stacks.
+
+    It asks no questions about what it stacks.
+    '''
+
+    def __init__(self, *objs, name=None):
+        super().__init__(name=name)
+        self.objs = objs
+
+    def call(self, x):
+        y = x
+        for obj in self.objs:
+            y = obj(y)
+        return y
+
+    def __getitem__(self, ix):
+        return self.objs[ix]
+
+
+class Gated(Template):
+    '''
+    Must be instantiated with a factory.
+
+    On production, instantiates a second product with sigmoid activations.
+    This product is called on the same inputs as the principal, and the
+    principal's output is multiplied by that of the gater.
+    '''
+
+    def __init__(self, factory: Die) -> None:
+        super().__init__(name='gated')
+        self.fac = factory.clone(name=factory.name, activation=None)
+        self.gfac = factory.clone(
+            name=factory.name + '_gate', activation='hard_sigmoid')
+
+    def call(self, x):
+        g = self.gfac(x)
+        y = self.fac(x)
+
+        with self.suffix_name('mul_gate'):
+            return kl.Multiply(name=self.get_name())([g, y])
+
+
+class Residual(Template):
+    '''
+    Sums the template's output with its own input, and opionally
+    applies an activation to the result.
+    '''
+
+    def __init__(self, *objs, activation=None) -> None:
+        super().__init__(name='res')
+        self.objs = objs
+        self.activation = activation
+
+    def call(self, x):
+        y = x
+
+        if self.activation is not None:
+            with self.suffix_name('res_activation'):
+                y = kl.Activation(self.activation, name=self.get_name())(y)
+
+        for obj in self.objs:
+            y = obj(y)
+
+        y = Reduce(kl.Add, name='add_input')(x, y)
+
+        return y
+
+
+class TCTX:
+    '''
+    Template execution context and parameter generator.
+    '''
+
+    def new_frame(self, template: Template):
+        class _frame:
+            def __enter__(inner_self):
+                self._enter(template)
+            def __exit__(inner_self, *_):  # noqa
+                self._exit(template)
+        return _frame()
+
+    @abstractmethod
+    def _enter(self, template):
+        pass  
+
+    @abstractmethod
+    def _exit(self, template):
+        pass
+
+
+# TODO: metahyperparam
+class HyperParam:
+
+    def __init__(self, val, *args, **kwargs):
+        self._val = val
+        self.vmin = vmin
+        self.vmax = vmax
+
+    @property
+    def val(self):
+        return self.val

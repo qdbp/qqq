@@ -1,7 +1,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 
-#include <python3.6m/Python.h>
+#include <python3.7m/Python.h>
 #include <numpy/arrayobject.h>
 #include <X11/X.h>
 #include <X11/Xlib.h>
