@@ -1,14 +1,19 @@
+from __future__ import annotations
+
 import os.path as osp
 import pickle
+import sys
+import typing as ty
 from collections import defaultdict, namedtuple
 from collections.abc import Mapping, Sequence
 from functools import wraps
 from inspect import Parameter, signature
-import sys
 from time import sleep, time
-from typing import Any, Collection, Dict, List, Optional, Sized
+from typing import Any, Collection, Dict, List, Optional, Sized, TypeVar
 
 PrioTup = namedtuple("PrioTup", ("prio", "value"))
+
+T = TypeVar('T')
 
 
 def die(msg, code=-1, debug_locals=None):
@@ -38,25 +43,27 @@ def ensure_type(obj, t, *args, **kwargs):
         return obj
 
 
-def as_list(obj) -> List[Any]:
+def as_list(obj: Optional[ty.Union[T, List[T], ty.Tuple[T], ty.Set[T]]]
+            ) -> List[T]:
     """
     Coerces the input into a list.
 
     None is turned into an empty list.
-    Iterables are read into a list.
+    Tuples and Sets are coerced into a list.
     All other objects are wrapped in a singleton list.
     """
 
     if obj is None:
         return []
-
-    if isinstance(obj, (list, tuple)):
+    elif isinstance(obj, (set, tuple)):
         return list(obj)
+    elif isinstance(obj, list):
+        return obj
     else:
         return [obj]
 
 
-def flatten(xs: List[List[Any]]):
+def flatten(xs: List[List[T]]) -> List[T]:
     """
     Flattens a list of lists. Does not recurse.
     """
@@ -77,7 +84,7 @@ def sift_kwargs(f):
 
 def kwsift(kw, f):
     """
-    Sifts a keyoword argument dictionary with respect to a function.
+    Sifts a keyword argument dictionary with respect to a function.
 
     Returns a dictionary with those entries that the given function
     accepts as keyword arguments.
@@ -101,7 +108,7 @@ def kwsift(kw, f):
 
 
 def check_all_same_length(
-    *args: Sized, allow_none: bool = False, msg: str = None
+        *args: Sized, allow_none: bool = False, msg: str = None
 ) -> int:
     """
     Checks that all arguments are the same length.  Raises ValueError if
@@ -115,7 +122,9 @@ def check_all_same_length(
     s = {len(arg) for arg in args if not allow_none or arg is not None}
 
     if len(s) != 1:
-        raise ValueError(f"arguments have different lengths! {s}\n" + (msg or ""))
+        raise ValueError(
+            f"arguments have different lengths! {s}\n" + (msg or "")
+        )
 
     return s.pop()
 
@@ -148,125 +157,3 @@ def save_pickle(obj, name):
 def load_pickle(name):
     with open(f"{name}.p", "rb") as f:
         return pickle.load(f)
-
-
-class UQLError(Exception):
-    pass  # noqa
-
-
-def uql(d, k, default=None):
-    """
-    Micro-Query Language.
-
-    Dissect nested dicts. Dismember JSON without mercy.
-
-    Valid keys for a given subcontainer which are not found
-    in that subcontainer trigger the default return. On the other hand,
-    invalid keys or attempting to index non-containers raises a
-    UQLError.
-
-    >>> d = {'a': {'1': 'foo', '2': ['bar', 'baz']}}
-    >>> uql(d, 'a.2.1')
-    "bar"
-    >>> uql(d, 'a.1.b')
-    InvalidPathError
-    >>> uql(d, 'a.2.3', 'qux')
-    "qux"
-    """
-
-    key, _, rest = k.partition(".")
-
-    if isinstance(d, Mapping):
-        if key in d:
-            if not rest:
-                return d[key]
-            else:
-                return uql(d[key], rest, default=default)
-        else:
-            try:
-                if int(key) in d:
-                    if not rest:
-                        return d[key]
-                    else:
-                        uql(d[key], rest, default=default)
-            except ValueError:
-                return default
-
-    elif isinstance(d, Sequence):
-        try:
-            ix = int(key)
-        except ValueError:
-            raise UQLError(f"bad subkey {key} for subcontainer {d}")
-        if not rest:
-            try:
-                return d[ix]
-            except IndexError:
-                return default
-        else:
-            return uql(d[ix], rest, default=default)
-
-    else:
-        raise UQLError(f"attempt to get key {key} from terminal value {d}")
-
-
-class Stopwatch:
-    """
-    Convenience class for timing operations.
-
-    Can track a number of timers, identified by strings keys, in parallel.
-    """
-
-    @property
-    @classmethod
-    def now(cls):
-        """
-        Returns the current time.
-
-        Convenience method to avoid explicit imports of `time`.
-        """
-        return time()
-
-    def __init__(self) -> None:
-        self.marks: Dict[Optional[str], float] = {}
-        self.dts: Dict[Optional[str], float] = {}
-
-    def is_set(self, key: str = None):
-        return self.marks[key] is not None
-
-    def set(self, key: str = None) -> None:
-        """
-        (Re)sets the timer identified by `key`.
-        """
-        self.marks[key] = time()
-
-    def elapsed(self, key=None) -> float:
-        """
-        Returns the time elapsed since the key was set.
-        """
-        if self.marks[key] is None:
-            raise ValueError(f"Mark for key {key} was not set")
-        return time() - self.marks[key]
-
-    def lap(self, key: str = None) -> float:
-        """
-        Returns the time elapsed since the last time the key was set,
-        and sets the key.
-        """
-        elapsed = self.elapsed(key)
-        self.set(key)
-        return elapsed
-
-    def clear(self, key=None):
-        del self.marks[key]
-
-    def sleep(self, t):
-        """
-        Convenience wrapper around time.sleep()
-        """
-        sleep(t)
-
-    def wait(self, until):
-        dt = until - time()
-        if dt <= 0.:
-            return
-        sleep(dt)
