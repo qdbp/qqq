@@ -1,8 +1,7 @@
+import typing as ty
 from functools import lru_cache
-from threading import Lock
 
 import numpy as np
-import numpy.random as npr
 from numpy.lib.stride_tricks import as_strided
 
 
@@ -10,12 +9,16 @@ def softmax(x):
     return np.exp(x) / np.sum(np.exp(x), axis=0)
 
 
-def relu(x):
-    return np.maximum(x, 0)
-
-
 def decay(k, x, x0):
     return k * x + (1 - k) * x0
+
+
+def complement_shape(shape: ty.Tuple[int, ...],
+                     axis: int) -> ty.Tuple[int, ...]:
+    if len(shape) < 1:
+        raise ValueError("Cannot complement an empty shape.")
+
+    return shape[:axis] + shape[axis + 1:]
 
 
 def sl_window(arr: np.ndarray, window: int, stride: int, axis=0, sl_axis=0):
@@ -43,10 +46,11 @@ def sl_window(arr: np.ndarray, window: int, stride: int, axis=0, sl_axis=0):
     num_windows = 1 + (arr.shape[axis] - window) // stride
     win_stride = stride * arr.strides[axis]
 
-    new_shape = arr.shape[:axis] + (window,) + arr.shape[axis + 1 :]
-    new_shape = new_shape[:sl_axis] + (num_windows,) + new_shape[sl_axis:]
+    new_shape = arr.shape[:axis] + (window, ) + arr.shape[axis + 1:]
+    new_shape = new_shape[:sl_axis] + (num_windows, ) + new_shape[sl_axis:]
 
-    new_strides = arr.strides[:sl_axis] + (win_stride,) + arr.strides[sl_axis:]
+    new_strides = arr.strides[:sl_axis] + (win_stride,
+                                           ) + arr.strides[sl_axis:]
 
     return as_strided(arr, new_shape, new_strides)
 
@@ -63,7 +67,7 @@ def round_to_pow2(n):
     """
     Round a number to the next highest power of two.
     """
-    return 2 ** np.ceil(np.log2(n))
+    return 2**np.ceil(np.log2(n))
 
 
 @lru_cache(maxsize=4)
@@ -84,11 +88,11 @@ def hilbert_ixes(width):
 
     while len(proto) < width:
 
-        arr[l : 2 * l, :l] += proto.size + proto.T
-        arr[l : 2 * l, l : 2 * l] = 2 * proto.size + proto.T
-        arr[:l, l : 2 * l] = 3 * proto.size + proto[::-1, ::-1]
+        arr[l:2 * l, :l] += proto.size + proto.T
+        arr[l:2 * l, l:2 * l] = 2 * proto.size + proto.T
+        arr[:l, l:2 * l] = 3 * proto.size + proto[::-1, ::-1]
 
-        proto = arr[: l * 2, : l * 2].copy().T
+        proto = arr[:l * 2, :l * 2].copy().T
         arr = arr.T
         l = len(proto)
 

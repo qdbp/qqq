@@ -4,11 +4,11 @@ import time
 from collections import deque
 from functools import wraps
 from threading import Lock
-from typing import Deque  # noqa
+from typing import Deque
 
 
 class PoolThrottle:
-    '''
+    """
     Function call throttle, "X calls in Y seconds" style.
 
     Wraps a callable and constrains call flow to adhere to a "max X requests in
@@ -22,10 +22,10 @@ class PoolThrottle:
     Call order is preserved.
 
     Thread-safe.
-    '''
+    """
 
-    def __init__(self, *, pool: int, window: int, strict=False) -> None:
-        '''
+    def __init__(self, *, pool: int, window: float, strict=False) -> None:
+        """
         Args:
             pool:
                 max requests allowed in a sliding window of `window` seconds
@@ -39,7 +39,7 @@ class PoolThrottle:
                 only after it returns, else it will start right before the call
                 is made. A strict pool effectively makes X calls every (Y +
                 average_call_time) seconds.
-        '''
+        """
         self.pool = pool
         self.window = window
         self.strict = strict
@@ -77,8 +77,9 @@ class PoolThrottle:
 
                 # NOTE don't do actual function call with the lock
                 with self._ifl_lock:
-                    do_call = (self._ifl < self.pool and
-                               number == self._now_serving)
+                    do_call = (
+                        self._ifl < self.pool and number == self._now_serving
+                    )
                     if do_call:
                         self._ifl += 1
                         self._now_serving += 1
@@ -92,11 +93,12 @@ class PoolThrottle:
                             self._sched.enter(self.window, 1, self._dec_ifl)
                 else:
                     time.sleep(1e-2 if wait is None else wait)
+
         return throttled
 
 
 class PoolThrottleAsync:
-    '''
+    """
     Performs the same function as PoolThrottle, except intended for use
     in single-threaded asyncio applications.
 
@@ -104,10 +106,11 @@ class PoolThrottleAsync:
     yield control.
 
     Categorically not thread safe.
-    '''
+    """
 
     def __init__(
-            self, *, pool: int, window: int, loop, granularity=1e-2) -> None:
+        self, *, pool: int, window: int, loop, granularity=1e-2
+    ) -> None:
 
         self.pool = pool
         self.window = window
@@ -132,7 +135,6 @@ class PoolThrottleAsync:
         return n
 
     def __call__(self, f):
-
         @wraps(f)
         async def throttled(*args, **kwargs):
             number = self._take_a_number()
@@ -158,11 +160,14 @@ class PoolThrottleAsync:
                 # opportunity
                 else:
                     try:
-                        await aio.sleep(max(
-                            self.granularity,
-                            self._next_slots[0] - self.loop.time() -
-                            self.granularity
-                        ))
+                        await aio.sleep(
+                            max(
+                                self.granularity,
+                                self._next_slots[0]
+                                - self.loop.time()
+                                - self.granularity,
+                            )
+                        )
                     except Exception as e:
                         print(e)
 

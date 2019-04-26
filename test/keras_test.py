@@ -6,7 +6,6 @@ import keras.callbacks as kc
 import keras.layers as kl
 import keras.models as km
 import keras.optimizers as ko
-import matplotlib.pyplot as plt
 import numpy as np
 import numpy.random as npr
 import pytest

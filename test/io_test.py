@@ -1,11 +1,6 @@
 import concurrent.futures as cfu
-from queue import Queue, Empty
 import time
-from threading import Event
-import threading
 
-import numpy.random as npr
-import pytest
 
 import vnv.io as qio
 
@@ -62,8 +57,3 @@ def test_aio_poolthrottle(event_loop):
 
     assert 5 <= len(out) <= 7
     assert 1.8 <= (out[-1] - out[0]) <= 2.2
-
-
-if __name__ == '__main__':
-    # pytest.main([__file__])
-    test_poolthrottle()

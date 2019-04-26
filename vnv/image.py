@@ -4,11 +4,9 @@ import numpy.random as npr
 
 from .np import hilbert_ixes
 
-from .cx.screenshot import screenshot as screenshot
-
 
 def subpixel_shift(img_arr, dx=0.5, inplace=True):
-    '''
+    """
     Shifts an image by a fraction of a pixel in a random direction,
     with circular boundary conditions.
 
@@ -17,12 +15,11 @@ def subpixel_shift(img_arr, dx=0.5, inplace=True):
         dx (float): distance in pixel to shift by
         inplace (bool): if True, will modify the array inplace
 
-    '''
+    """
 
     f = fft.fft2(img_arr, axes=(0, 1))
     g = np.meshgrid(
-        fft.fftfreq(img_arr.shape[-3]),
-        fft.fftfreq(img_arr.shape[-2])
+        fft.fftfreq(img_arr.shape[-3]), fft.fftfreq(img_arr.shape[-2])
     )
 
     u = npr.normal(0, 1, size=2)
@@ -37,9 +34,9 @@ def subpixel_shift(img_arr, dx=0.5, inplace=True):
 
 
 def cartesian_shift(img_arr):
-    '''
+    """
     Shifts an image along axes by one pixel. Inplace opration.
-    '''
+    """
     zeros = [None, None]
     slices_s = [..., None, None, slice(None, None)]
     slices_d = [..., None, None, slice(None, None)]
@@ -64,15 +61,15 @@ def cartesian_shift(img_arr):
     img_arr[tuple(slices_d)] = img_arr[tuple(slices_s)]
 
     if zeros[0] is not None:
-        img_arr[..., zeros[0], :, :] = 0.
+        img_arr[..., zeros[0], :, :] = 0.0
     if zeros[1] is not None:
-        img_arr[..., :, zeros[1], :] = 0.
+        img_arr[..., :, zeros[1], :] = 0.0
 
 
 def image_flip(img_arr):
-    '''
+    """
     Flips an image at random along x and y. Inplace operation.
-    '''
+    """
     x = npr.randint(4)
     if x == 0:
         img_arr[..., :, :, :] = img_arr[..., ::-1, ::-1, :]
@@ -84,12 +81,12 @@ def image_flip(img_arr):
 
 
 def chunk_image(img_arr, chunk_size=32, random=True):
-    '''
+    """
     Chunks an image into a sequence of smaller images.
 
     Assumes the image is evenly divisible, discards lower-right remainder
     if not.
-    '''
+    """
 
     cw = img_arr.shape[1] // chunk_size
     ch = img_arr.shape[0] // chunk_size
@@ -105,11 +102,11 @@ def chunk_image(img_arr, chunk_size=32, random=True):
 
     for i in range(ch):
         for j in range(cw):
-            out[ixes[i * cw + j], :] =\
-                img_arr[
-                    chunk_size * i:chunk_size * (i + 1),
-                    chunk_size * j:chunk_size * (j + 1),
-                    ...]
+            out[ixes[i * cw + j], :] = img_arr[
+                chunk_size * i : chunk_size * (i + 1),
+                chunk_size * j : chunk_size * (j + 1),
+                ...,
+            ]
 
     return out
 
@@ -122,13 +119,13 @@ def chunk_image_shape(shape, chunk_size=32):
 
 
 def shift_colors(img_arr, *, components, scale=0.05):
-    '''
+    """
     Adjust colors a la Krizhevsky et al (2012).
 
     Arguments:
         components: matrix of lambda-scaled principal components, as rows.
         scale: std of pc coefficients
-    '''
+    """
 
     noise = npr.normal(0, scale, img_arr.shape[-1])
     img_arr += noise @ components
@@ -137,7 +134,7 @@ def shift_colors(img_arr, *, components, scale=0.05):
 def hilbertize_image(img_arr):
     w = img_arr.shape[0]
 
-    o = np.zeros((w**2, img_arr.shape[-1]), dtype=np.float16)
+    o = np.zeros((w ** 2, img_arr.shape[-1]), dtype=np.float16)
     hix = hilbert_ixes(w)
 
     for i in range(w):
@@ -152,9 +149,9 @@ def hilbertize_image_shape(img_shape):
 
 
 def color_zca(img_arr, *, mu, W):
-    '''
+    """
     Transforms the image colorspace into the space defined by the given
     components.
-    '''
+    """
 
     img_arr[:] = (img_arr - mu) @ W

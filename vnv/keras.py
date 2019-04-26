@@ -1,66 +1,77 @@
-from collections import Counter, deque
 import concurrent.futures as cfu
-from functools import lru_cache
 import os
+import warnings
 from abc import abstractmethod
-from collections import defaultdict
-from typing import Iterable, Union
+from collections import Counter, defaultdict, deque
+from functools import lru_cache
 
-import click as clk
-import keras.activations as ka
 import keras.backend as K
 import keras.callbacks as kc
 import keras.layers as kl
 import matplotlib.collections as mplc
-import matplotlib.pyplot as plt
 import matplotlib.ticker as mtick
 import numpy as np
 import numpy.random as npr
-from colored import attr, fg
 from keras.callbacks import Callback
 from keras.engine.topology import Layer
 from keras.models import Model
 from keras.utils import to_categorical
-from tqdm import tqdm
 
 from .log import get_logger
 from .util import as_list
 
+try:
+    import matplotlib.pyplot as plt
+except ImportError:
+    import matplotlib
+
+    matplotlib.use("agg")
+    import matplotlib.pyplot as plt
+
+try:
+    from colored import attr, fg
+except ImportError:
+    warnings.warn("Install the 'colored' package for color output support")
+
+    def attr(s: str) -> str:
+        return s
+
+    fg = attr
+
+
 LOG = get_logger(__file__)
 
-HDF5_EXT = 'hdf5'
-JSON_EXT = 'json'
-PNG_EXT = 'png'
+HDF5_EXT = "hdf5"
+JSON_EXT = "json"
+PNG_EXT = "png"
 
 
 # MODEL CONSTRUCTION
 
+
 def apply_layers(inp, *stacks, td=False):
-    '''
+    """
     Applies the Keras layers in the list of stacks sequentially to the input.
 
     If `td` is True, applies one layer of TimeDistributed to each layer.
     If `td` is an integer, applies `td` levels of TimeDistributed to each
     layer.
-    '''
+    """
 
     td = int(td)
     y = inp
     for stack in stacks:
         for layer in stack:
-            for i in range(td):
+            for _ in range(td):
                 layer = kl.TimeDistributed(layer)
             y = layer(y)
     return y
 
 
 def compile_model(
-        x, y, *,
-        loss='cxe',
-        aux_losses=None,
-        optimizer='nadam',
-        metrics=None):
-    '''
+    x, y, *, loss="cxe", aux_losses=None, optimizer="nadam", metrics=None
+):
+    """
     Compiles a keras model with sensible defaults.
 
     Arguments:
@@ -83,7 +94,7 @@ def compile_model(
             `Model.compile`. Understands the following shorthand:
                 acc -> categorical_accuracy
                 bacc -> binary_accuracy
-    '''
+    """
 
     outputs = as_list(y)
     inputs = as_list(x)
@@ -101,7 +112,8 @@ def compile_model(
 
         if len(arg) != len(outputs):
             raise ValueError(
-                'Number of losses doesn\'t match the number of outputs')
+                "Number of losses doesn't match the number of outputs"
+            )
 
         if not isinstance(arg, dict):
             return [tr_dict.get(x, x) for x in arg]
@@ -109,16 +121,13 @@ def compile_model(
             return {k: tr_dict.get(v, v) for k, v in arg.items()}
 
     loss_map = {
-        'cxe': 'categorical_crossentropy',
-        'bxe': 'categorical_crossentropy',
+        "cxe": "categorical_crossentropy",
+        "bxe": "categorical_crossentropy",
     }
     loss = _rectify(loss, loss_map)
     losses = as_list(aux_losses)
 
-    metric_map = {
-        'acc': 'categorical_accuracy',
-        'bacc': 'binary_accuracy',
-    }
+    metric_map = {"acc": "categorical_accuracy", "bacc": "binary_accuracy"}
     metrics = _rectify(metrics, metric_map)
 
     m = Model(inputs=inputs, outputs=outputs)
@@ -130,27 +139,34 @@ def compile_model(
 
 
 def get_callbacks(
-        name, *, pat_stop=15, pat_lr=3, plot=False, val=True,
-        epochs=50, base_lr=0.001):
-    '''
+    name,
+    *,
+    pat_stop=15,
+    pat_lr=3,
+    plot=False,
+    val=True,
+    epochs=50,
+    base_lr=0.001,
+):
+    """
     Returns some sensible default callbacks for Keras model training.
-    '''
-    monitor = 'val_loss' if val else 'loss'
+    """
+    monitor = "val_loss" if val else "loss"
 
-    os.makedirs('./weights/', exist_ok=True)
-    os.makedirs('./logs/', exist_ok=True)
+    os.makedirs("./weights/", exist_ok=True)
+    os.makedirs("./logs/", exist_ok=True)
 
     out = [
         kc.ModelCheckpoint(
-            f'./weights/{name}.hdf5', save_best_only=True, monitor=monitor),
+            f"./weights/{name}.hdf5", save_best_only=True, monitor=monitor
+        ),
         ValLossPP(),
         KQLogger(name),
-        kc.CSVLogger(f'./logs/{name}.csv'),
+        kc.CSVLogger(f"./logs/{name}.csv"),
         # kc.ReduceLROnPlateau(
         #     patience=pat_lr, factor=1/np.e, monitor=monitor),
         # linear lr schedule
-        kc.LearningRateScheduler(
-            lambda epoch: base_lr * (1 - epoch / epochs)),
+        kc.LearningRateScheduler(lambda epoch: base_lr * (1 - epoch / epochs)),
         kc.EarlyStopping(patience=pat_stop, monitor=monitor),
     ]
 
@@ -166,13 +182,16 @@ def shuffle_weights(weights):
 
 # DATA
 
+
 def data_mnist(**kwargs):
     from keras.datasets import mnist
+
     return normalize_data(mnist.load_data, **kwargs)
 
 
 def data_fnist(**kwargs):
     from keras.datasets import fashion_mnist
+
     return normalize_data(fashion_mnist.load_data, **kwargs)
 
 
@@ -205,48 +224,50 @@ def normalize_data(load_func, flatten=False, featurewise_norm=True):
 
 # CALLBACKS
 
+
 class HypergradientScheduler(Callback):
-    '''
+    """
     A learning rate scheduler that plays nice with other schedulers by
     mixing in a multiplier rather than overwriting the lr wholesale.
-    '''
+    """
+
     # FIXME: can only be feasibly implemented as an optimizer
 
 
 class KQLogger(Callback):
-
     def __init__(self, name):
         self.name = name
         self.best_val_loss = np.inf
         self.last_epoch = 0
 
     def on_epoch_end(self, epoch, logs):
-        self.best_val_loss =\
-            min(logs.get('val_loss', np.inf), self.best_val_loss)
+        self.best_val_loss = min(
+            logs.get("val_loss", np.inf), self.best_val_loss
+        )
         self.last_epoch += 1
 
     def on_train_begin(self, logs):
-        LOG.info(f'begin training model {self.name}'.upper())
+        LOG.info(f"begin training model {self.name}".upper())
 
     def on_train_end(self, logs):
         if self.best_val_loss < np.inf:
-            LOG.info(f'best val loss {self.best_val_loss:.4f}')
+            LOG.info(f"best val loss {self.best_val_loss:.4f}")
         LOG.info(
-            f'end training model {self.name},'
-            f' {self.last_epoch} epochs'.upper()
+            f"end training model {self.name},"
+            f" {self.last_epoch} epochs".upper()
         )
 
 
 class ValLossPP(Callback):
 
-    compare_more = {'accuracy'}
+    compare_more = {"accuracy"}
 
     @classmethod
     @lru_cache(maxsize=None)
     def is_compare_more(cls, key):
-        '''
+        """
         Returns True for keys where more is better.
-        '''
+        """
         for cm in cls.compare_more:
             if cm in key:
                 return True
@@ -257,22 +278,19 @@ class ValLossPP(Callback):
 
     def on_epoch_begin(self, epoch, logs):
         try:
-            total = self.params['steps']
+            total = self.params["steps"]
         except KeyError:
-            total =\
-                self.params.get('samples') // self.params.get('batch_size') + 1
-        self.counter = tqdm(
-            total=total,
-            desc=f'Epoch {epoch}',
-            leave=False,
-        )
+            total = (
+                self.params.get("samples") // self.params.get("batch_size") + 1
+            )
+        self.counter = tqdm(total=total, desc=f"Epoch {epoch}", leave=False)
 
     def on_batch_end(self, batch, logs):
         self.counter.update()
 
     def on_epoch_end(self, epoch, logs):  # noqa
         self.counter.close()
-        print(f'Epoch {epoch}')
+        print(f"Epoch {epoch}")
 
         greens = set()
         losses = {}
@@ -280,41 +298,42 @@ class ValLossPP(Callback):
 
         for key, val in logs.items():
 
-            if key not in self.params['metrics']:
+            if key not in self.params["metrics"]:
                 continue
 
-            if key.startswith('val_'):
+            if key.startswith("val_"):
                 val_losses[key] = val
                 if key not in self.best_val_loss:
                     self.best_val_loss[key] = val
                     greens.add(key)
 
-                elif ((self.is_compare_more(key) and
-                       val > self.best_val_loss[key]) or
-                      (not self.is_compare_more(key) and
-                        val < self.best_val_loss[key])):
+                elif (
+                    self.is_compare_more(key) and val > self.best_val_loss[key]
+                ) or (
+                    not self.is_compare_more(key)
+                    and val < self.best_val_loss[key]
+                ):
                     greens.add(key)
                     self.best_val_loss[key] = val
             else:
                 losses[key] = val
 
         for key in losses.keys():
-            tls = '{:.3f}'.format(losses[key])
-            vl = val_losses.get('val_' + key)
+            tls = "{:.3f}".format(losses[key])
+            vl = val_losses.get("val_" + key)
             if vl is None:
-                vls = '---'
+                vls = "---"
             else:
-                vls = '{:.3f}'.format(vl)
+                vls = "{:.3f}".format(vl)
 
-            if 'val_' + key in greens:
-                vls = fg('green') + attr('bold') + vls + attr('reset')
+            if "val_" + key in greens:
+                vls = fg("green") + attr("bold") + vls + attr("reset")
 
             # out += f'{key[4:]:-<40.40s}: train {tls} - {vls} val\n'
-            print(f'{key:-<40.40s}: train {tls} - {vls} val')
+            print(f"{key:-<40.40s}: train {tls} - {vls} val")
 
 
 class LiveLossPlot(Callback):
-
     def __init__(self, name, plot_style=None, bpp=10, bpp_inflation=1.1):
 
         self.name = name
@@ -337,13 +356,13 @@ class LiveLossPlot(Callback):
         return self.ax_acc if self._is_lab_acc(lab) else self.ax
 
     def _is_lab_acc(self, lab):
-        return 'acc' in lab
+        return "acc" in lab
 
     def _recenter_axes(self):
         self.ax.autoscale()
 
         self.ax.set_ylim(bottom=0)
-        self.ax_acc.set_ylim((0., 1))
+        self.ax_acc.set_ylim((0.0, 1))
 
         self.ax.set_xlim(left=1)
 
@@ -355,28 +374,26 @@ class LiveLossPlot(Callback):
         self.fig.set_size_inches(15, 8)
         self.ax = self.fig.add_subplot(1, 1, 1)
 
-        self.ax.set_title(f'{self.name} training plot')
-        self.ax.set_ylabel('loss')
-        self.ax.set_xlabel('batch')
-        self.ax.set_xscale('log')
+        self.ax.set_title(f"{self.name} training plot")
+        self.ax.set_ylabel("loss")
+        self.ax.set_xlabel("batch")
+        self.ax.set_xscale("log")
         self.ax.yaxis.set_minor_locator(mtick.AutoMinorLocator(n=5))
         self.ax.yaxis.set_minor_formatter(mtick.NullFormatter())
-        self.ax.grid(b=True, which='major', color='#7799bb', lw=0.3)
-        self.ax.grid(b=True, which='minor', color='#88aacc', lw=0.3, ls=':')
+        self.ax.grid(b=True, which="major", color="#7799bb", lw=0.3)
+        self.ax.grid(b=True, which="minor", color="#88aacc", lw=0.3, ls=":")
 
         self.ax_acc = self.ax.twinx()
-        self.ax_acc.grid(
-            b=True, which='major', color='#bb9977', lw=0.3)
-        self.ax_acc.grid(
-            b=True, which='minor', color='#ccaa88', lw=0.3, ls=':')
+        self.ax_acc.grid(b=True, which="major", color="#bb9977", lw=0.3)
+        self.ax_acc.grid(b=True, which="minor", color="#ccaa88", lw=0.3, ls=":")
 
-        self.ax_acc.set_ylabel('accuracy')
+        self.ax_acc.set_ylabel("accuracy")
         self._recenter_axes()
 
-        os.makedirs('./plots/', exist_ok=True)
+        os.makedirs("./plots/", exist_ok=True)
 
     def _update_plot(self, data):
-        batch = data.pop('batch')
+        batch = data.pop("batch")
 
         to_plot = []
         to_plot_acc = []
@@ -387,8 +404,9 @@ class LiveLossPlot(Callback):
         new_lines = False
         for lab, loss in data.items():
             if lab not in self.proxy_lines:
-                self.proxy_lines[lab] =\
-                    self._get_lab_axis(lab).plot([], [], label=lab,)[0]
+                self.proxy_lines[lab] = self._get_lab_axis(lab).plot(
+                    [], [], label=lab
+                )[0]
                 self.line_data[lab] = [(batch, loss)]
                 new_lines = True
             else:
@@ -406,27 +424,31 @@ class LiveLossPlot(Callback):
         if to_plot:
             lc = mplc.LineCollection(to_plot, colors=colors, linewidths=0.75)
             lc_acc = mplc.LineCollection(
-                to_plot_acc, colors=colors_acc, linewidths=0.75)
+                to_plot_acc, colors=colors_acc, linewidths=0.75
+            )
             self.ax.add_collection(lc)
             self.ax_acc.add_collection(lc_acc)
 
             self._recenter_axes()
 
             self.fig.canvas.draw()
-            self.fig.savefig(f'./plots/{self.name}.svg')
+            self.fig.savefig(f"./plots/{self.name}.svg")
 
     def on_batch_end(self, batch, logs):
 
-        add_point = all((
-            bool(self.monotonic_batch),
-            self.monotonic_batch == self.next_plot_batch,
-        ))
+        add_point = all(
+            (
+                bool(self.monotonic_batch),
+                self.monotonic_batch == self.next_plot_batch,
+            )
+        )
 
         if add_point:
             to_append = dict(batch=self.monotonic_batch)
 
-        loss_log =\
-            {k: v for k, v in logs.items() if k in self.params['metrics']}
+        loss_log = {
+            k: v for k, v in logs.items() if k in self.params["metrics"]
+        }
 
         for lab, loss in loss_log.items():
             if add_point:
@@ -444,31 +466,34 @@ class LiveLossPlot(Callback):
         self.monotonic_batch += 1
 
     def on_epoch_end(self, epoch, logs):
-        val_logs = {k: v for k, v in logs.items() if k[:4] == 'val_'}
-        val_logs['batch'] = self.monotonic_batch
+        val_logs = {k: v for k, v in logs.items() if k[:4] == "val_"}
+        val_logs["batch"] = self.monotonic_batch
         self._update_plot(val_logs)
 
     def on_train_end(self, logs):
         self.fig.canvas.draw()
-        self.fig.savefig(f'./plots/{self.name}.svg')
+        self.fig.savefig(f"./plots/{self.name}.svg")
 
 
 # LAYERS
 
+
 class NegGrad(Layer):
-    '''
+    """
     Inverts gradient flow, scalding by an adjustable parameter.
-    '''
+    """
 
     def __init__(self, lbd, **kwargs):
         super().__init__(**kwargs)
         if lbd < 0:
-            raise ValueError('lbd must be nonnegative.')
+            raise ValueError("lbd must be nonnegative.")
         self._lbd = lbd
 
     def build(self, input_shape):
         self.lbd = self.add_weight(
-            'lbd', (1,), trainable=False,
+            "lbd",
+            (1,),
+            trainable=False,
             initializer=lambda x: K.variable(self._lbd),
         )
         self.built = True
@@ -483,17 +508,15 @@ class NegGrad(Layer):
         self.lbd.set_value(lbd)
 
     def get_config(self):
-        config = {
-            'lbd': float(K.get_value(self.lbd)),
-        }
+        config = {"lbd": float(K.get_value(self.lbd))}
         config.update(super().get_config())
         return config
 
 
 class CReLU(Layer):
-    '''
+    """
     Concatenated relu activation.
-    '''
+    """
 
     def build(self):
         self.built = True
@@ -513,16 +536,15 @@ class CReLU(Layer):
 
 
 # ACTIVATIONS
-
 def negabs(x):
     return -K.abs(x)
 
 
 # LOSSES AND METRICS
 def f2_crossentropy(yt, yp):
-    '''
+    """
     Biased binary crossentropy, favouring recall.
-    '''
+    """
     yp = K.clip(yp, K.epsilon(), 1 - K.epsilon())
     return K.mean(-(2 * yt * K.log(yp) + (1 - yt) * K.log(1 - yp)))
 
@@ -538,11 +560,12 @@ def r2(yt, yp):
 
 # TEMPLATES
 
+
 class Template:
-    '''
+    """
     A higher level model building block, based on the formulaic combination
     of multiple layers.
-    '''
+    """
 
     name_resolver = Counter()
     name_stack = deque([])
@@ -574,9 +597,9 @@ class Template:
 
     @abstractmethod
     def call(self, *xs):
-        '''
+        """
         Applies this template to the keras tensor x.
-        '''
+        """
 
     def __mul__(self, n):
         if isinstance(n, int):
@@ -614,26 +637,28 @@ class Template:
             return NotImplemented
 
     def get_name(self):
-        out = '.'.join(self.__class__.name_stack)
+        out = ".".join(self.__class__.name_stack)
         index = self.name_resolver[out]
         self.name_resolver[out] += 1
-        out += '_' + str(index)
+        out += "_" + str(index)
         return out
 
     def suffix_name(self, name_suffix):
         class _:
             def __enter__(inner_self):
                 self.__class__.name_stack.append(name_suffix)
+
             def __exit__(inner_self, *_):  # noqa
                 self.__class__.name_stack.pop()
+
         return _()
 
 
 class Die(Template):
-    '''
+    """
     The lowest-level template: produces a new instance of a single layer
     with the parameters given at instantiation of this class.
-    '''
+    """
 
     def __init__(self, name: str, lcls: type, *args, **kwargs) -> None:
         super().__init__(name)
@@ -642,7 +667,7 @@ class Die(Template):
         self.kwargs = kwargs
 
         # get rid of an erroneous layer name; layers take the template name
-        self.kwargs.pop('name', None)
+        self.kwargs.pop("name", None)
 
         self._instances = {}  # type: ignore
 
@@ -652,21 +677,16 @@ class Die(Template):
         return self.__class__(name, self.lcls, *self.args, **new_kwargs)
 
     def call(self, xs):
-        layer = self.lcls(
-            *self.args,
-            name=self.get_name(),
-            **self.kwargs,
-        )
+        layer = self.lcls(*self.args, name=self.get_name(), **self.kwargs)
 
         self._instances[layer.name] = layer
-        
+
         return layer(xs)
 
 
 class Parallel(Template):
-
     def __init__(self, *objs, name=None):
-        super().__init__(name or 'parallel')
+        super().__init__(name or "parallel")
         self.objs = objs
 
     def call(self, x):
@@ -674,9 +694,8 @@ class Parallel(Template):
 
 
 class Reduce(Template):
-
     def __init__(self, objs, name=None) -> None:
-        super().__init__(name or 'reduce')
+        super().__init__(name or "reduce")
         self.objs = objs
 
     def call(self, xs):
@@ -692,11 +711,11 @@ class Reduce(Template):
 
 
 class Stacked(Template):
-    '''
+    """
     It stacks.
 
     It asks no questions about what it stacks.
-    '''
+    """
 
     def __init__(self, *objs, name=None):
         super().__init__(name=name)
@@ -713,36 +732,37 @@ class Stacked(Template):
 
 
 class Gated(Template):
-    '''
+    """
     Must be instantiated with a factory.
 
     On production, instantiates a second product with sigmoid activations.
     This product is called on the same inputs as the principal, and the
     principal's output is multiplied by that of the gater.
-    '''
+    """
 
     def __init__(self, factory: Die) -> None:
-        super().__init__(name='gated')
+        super().__init__(name="gated")
         self.fac = factory.clone(name=factory.name, activation=None)
         self.gfac = factory.clone(
-            name=factory.name + '_gate', activation='hard_sigmoid')
+            name=factory.name + "_gate", activation="hard_sigmoid"
+        )
 
     def call(self, x):
         g = self.gfac(x)
         y = self.fac(x)
 
-        with self.suffix_name('mul_gate'):
+        with self.suffix_name("mul_gate"):
             return kl.Multiply(name=self.get_name())([g, y])
 
 
 class Residual(Template):
-    '''
+    """
     Sums the template's output with its own input, and opionally
     applies an activation to the result.
-    '''
+    """
 
     def __init__(self, *objs, activation=None) -> None:
-        super().__init__(name='res')
+        super().__init__(name="res")
         self.objs = objs
         self.activation = activation
 
@@ -750,47 +770,36 @@ class Residual(Template):
         y = x
 
         if self.activation is not None:
-            with self.suffix_name('res_activation'):
+            with self.suffix_name("res_activation"):
                 y = kl.Activation(self.activation, name=self.get_name())(y)
 
         for obj in self.objs:
             y = obj(y)
 
-        y = Reduce(kl.Add, name='add_input')(x, y)
+        y = Reduce(kl.Add, name="add_input")(x, y)
 
         return y
 
 
 class TCTX:
-    '''
+    """
     Template execution context and parameter generator.
-    '''
+    """
 
     def new_frame(self, template: Template):
         class _frame:
             def __enter__(inner_self):
                 self._enter(template)
+
             def __exit__(inner_self, *_):  # noqa
                 self._exit(template)
+
         return _frame()
 
     @abstractmethod
     def _enter(self, template):
-        pass  
+        pass
 
     @abstractmethod
     def _exit(self, template):
         pass
-
-
-# TODO: metahyperparam
-class HyperParam:
-
-    def __init__(self, val, *args, **kwargs):
-        self._val = val
-        self.vmin = vmin
-        self.vmax = vmax
-
-    @property
-    def val(self):
-        return self.val

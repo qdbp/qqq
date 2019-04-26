@@ -59,8 +59,9 @@ def mk_bin_from_mlc(y_mlc):
     ]
 
 
-def gen_random_labels(X: Union[np.ndarray, int], n_classes: int,
-                      pvec=None) -> np.ndarray:
+def gen_random_labels(
+    X: Union[np.ndarray, int], n_classes: int, pvec=None
+) -> np.ndarray:
     """
     Returns a random labelling of dataset X.
 
@@ -85,7 +86,7 @@ def gen_random_labels(X: Union[np.ndarray, int], n_classes: int,
     else:
         num = X.shape[0]
 
-    pvec = np.ones((n_classes, )) / n_classes
+    pvec = np.ones((n_classes,)) / n_classes
 
     return npr.multinomial(1, pvec, size=num)
 
@@ -128,17 +129,17 @@ def dict_tt_split(*data_dicts, **tts_kwargs):
     for dx, data_dict in enumerate(data_dicts):
         for k, arr in data_dict.items():
             train, test = train_test_split(
-                arr, random_state=copy(rs), **tts_kwargs, shuffle=False)
+                arr, random_state=copy(rs), **tts_kwargs, shuffle=False
+            )
             train_dict[dx][k] = train
             test_dict[dx][k] = test
 
     return tuple(train_dict), tuple(test_dict)
 
 
-def dict_arr_concat(*dicts: Dict[Any, np.ndarray],
-                    check_keys=False,
-                    check_lens=False,
-                    axis=0):
+def dict_arr_concat(
+    *dicts: Dict[Any, np.ndarray], check_keys=False, check_lens=False, axis=0
+):
     """
     Concatenate numpy arrays held in dictionaries.
 
@@ -163,7 +164,8 @@ def dict_arr_concat(*dicts: Dict[Any, np.ndarray],
     if check_keys:
         if not alleq([d.keys() for d in dicts]):
             raise ValueError(
-                "The given dictionaries do not all have the same keys")
+                "The given dictionaries do not all have the same keys"
+            )
 
     all_keys: Set[Any] = set()
     for d in dicts:
@@ -173,17 +175,20 @@ def dict_arr_concat(*dicts: Dict[Any, np.ndarray],
     dtypes: Dict[Any, Type] = {}
 
     for k in all_keys:
-        if not alleq([
-                d[k].shape[:axis] + d[k].shape[axis + 1:]
-                for d in dicts if k in d
-        ]):
+        if not alleq(
+            [
+                d[k].shape[:axis] + d[k].shape[axis + 1 :]
+                for d in dicts
+                if k in d
+            ]
+        ):
             raise ValueError(f"Incompatible shapes on key '{k}'!")
         if not alleq([d[k].dtype for d in dicts if k in d]):
             raise ValueError(f"Incompatible array types for key '{k}'!")
 
         for d in dicts:
             if k in d:
-                shapes[k] = (d[k].shape[:axis], d[k].shape[axis + 1:])
+                shapes[k] = (d[k].shape[:axis], d[k].shape[axis + 1 :])
                 dtypes[k] = d[k].dtype
                 break
         else:
@@ -194,15 +199,14 @@ def dict_arr_concat(*dicts: Dict[Any, np.ndarray],
             if not alleq([arr.shape[axis] for arr in d.values()]):
                 raise ValueError(
                     f"Dict number {dx} has arrays of differing lengths, "
-                    "and check_lens is enabled.")
+                    "and check_lens is enabled."
+                )
 
     lens = {
-        k: sum([d[k].shape[axis] for d in dicts if k in d])
-        for k in all_keys
+        k: sum([d[k].shape[axis] for d in dicts if k in d]) for k in all_keys
     }
     out = {
-        k: np.zeros(
-            shapes[k][0] + (lens[k], ) + shapes[k][1], dtype=dtypes[k])
+        k: np.zeros(shapes[k][0] + (lens[k],) + shapes[k][1], dtype=dtypes[k])
         for k in all_keys
     }
 
@@ -211,14 +215,16 @@ def dict_arr_concat(*dicts: Dict[Any, np.ndarray],
         for k, v in d.items():
             dl = v.shape[axis]
             sl = (
-                (slice(None), ) * len(shapes[k][0])
-                + (slice(ixes[k], ixes[k] + dl), )
-                + (slice(None), ) * len(shapes[k][1]))
+                (slice(None),) * len(shapes[k][0])
+                + (slice(ixes[k], ixes[k] + dl),)
+                + (slice(None),) * len(shapes[k][1])
+            )
             out[k][sl] = v[...]
             ixes[k] += dl
 
-    assert ixes == lens,\
-        "BUG! did not align arrays when filling `out` correctly"
+    assert (
+        ixes == lens
+    ), "BUG! did not align arrays when filling `out` correctly"
     return out
 
 
@@ -226,15 +232,17 @@ def dict_arr_eq(d1: DataDict, d2: DataDict):
     """
     Correctly compares dictionaries of numpy arrays for equality correctly.
     """
-    return (d1.keys() == d2.keys()
-            and all(d1[k].shape == d2[k].shape for k in d1.keys())
-            and all(np.allclose(d1[k], d2[k]) for k in d1.keys()))
+    return (
+        d1.keys() == d2.keys()
+        and all(d1[k].shape == d2[k].shape for k in d1.keys())
+        and all(np.allclose(d1[k], d2[k]) for k in d1.keys())
+    )
 
 
 def get_train_test_gens(
-        *data_dicts: DataDict, splitter=ShuffleSplit, splitter_opts,
-        **genbatchopts):
-    '''
+    *data_dicts: DataDict, splitter=ShuffleSplit, splitter_opts, **genbatchopts
+):
+    """
     Creates training and validation generators from a list of data
     dictionaries.
 
@@ -259,7 +267,7 @@ def get_train_test_gens(
         N generators, where N is the number of index arrays returned by the
         `splitter`. Each generator will independently yield samples from its
         partition according to the `genbatchopts` options passed.
-    '''
+    """
 
     if isinstance(splitter, type):
         splitter = splitter(**splitter_opts)
@@ -267,25 +275,27 @@ def get_train_test_gens(
         if splitter_opts:
             warn(
                 "Passed splitter_opts, but splitter is an existing object."
-                "They will be ignored.")
+                "They will be ignored."
+            )
 
     index_arrays = splitter.split()
 
     out = []
     for ixes in index_arrays:
-        out.append(generate_batches(
-            *data_dicts, bound_ixes=ixes, **genbatchopts))
+        out.append(
+            generate_batches(*data_dicts, bound_ixes=ixes, **genbatchopts)
+        )
 
     return tuple(out)
 
 
 def generate_batches(
-        *data_dicts: DataDict,
-        bs=128,
-        balance_key: str = None,
-        sequential: bool = False,
-        sample_weights: np.ndarray = None,
-        bound_ixes: np.ndarray = None
+    *data_dicts: DataDict,
+    bs=128,
+    balance_key: str = None,
+    sequential: bool = False,
+    sample_weights: np.ndarray = None,
+    bound_ixes: np.ndarray = None,
 ):
     """
     Generate batches of data from a sequence of data dictionaries, i.e.
@@ -314,7 +324,8 @@ def generate_batches(
     """
 
     raw_n_samples = check_all_same_length(
-        *flatten([list(d.values()) for d in data_dicts]))
+        *flatten([list(d.values()) for d in data_dicts])
+    )
 
     if bound_ixes is None:
         ix_arange = np.arange(raw_n_samples, dtype=np.uint64)
@@ -336,16 +347,19 @@ def generate_batches(
         ]
         if not balance_values:
             raise ValueError(
-                f"No data found for balance key '{balance_key}' in any dict.")
+                f"No data found for balance key '{balance_key}' in any dict."
+            )
         elif len(balance_values) > 1:
             raise ValueError(
-                f"More than one data array found for '{balance_key}'")
+                f"More than one data array found for '{balance_key}'"
+            )
 
         # list of dicts with the key -> first elem -> actual array in dict
         balance_arr = balance_values.pop()
         if len(balance_arr.shape) != 2:
             raise ValueError(
-                f"Can't balance based on data with shape {balance_arr.shape}!")
+                f"Can't balance based on data with shape {balance_arr.shape}!"
+            )
 
         if not np.allclose(balance_arr.sum(axis=1), np.ones(n_samples)):
             warn("Label array does not appear to be one-hot encoded")
@@ -354,8 +368,9 @@ def generate_batches(
         n_classes = balance_arr.shape[1]
         p_ixes = balance_arr.argmax(axis=1)
 
-        probs = np.ones(
-            n_samples, dtype=np.float64) / (n_classes * n_per_class[p_ixes])
+        probs = np.ones(n_samples, dtype=np.float64) / (
+            n_classes * n_per_class[p_ixes]
+        )
 
     else:
         probs = np.ones(n_samples) / n_samples
@@ -383,18 +398,19 @@ def apply_bts(gen, bts, *, train):
 
 
 def batch_transformer(
-        f: Callable[..., np.ndarray],
-        *,
-        inplace: bool,
-        mode: str = "each", batchwise_apply: bool = False,
-        in_keys: Sequence[str] = None,
-        out_keys: Sequence[Union[str, Tuple[int, str]]] = None,
-        pop_in_keys: bool = True,
-        train_only: bool = False,
+    f: Callable[..., np.ndarray],
+    *,
+    inplace: bool,
+    mode: str = "each",
+    batchwise_apply: bool = False,
+    in_keys: Sequence[str] = None,
+    out_keys: Sequence[Union[str, Tuple[int, str]]] = None,
+    pop_in_keys: bool = True,
+    train_only: bool = False,
 ):
     """
-    Transforms functions over individual arrays into functions taking
-    batch generators and returning batch generators of transformed data.
+    Transforms functions over individual arrays into functions taking batch
+    generators and returning batch generators of transformed data.
 
     Arguments:
         f: a batchwise function
@@ -467,30 +483,30 @@ def batch_transformer(
         # should loop forever
         for batch in gen:
             if not isinstance(batch, tuple):
-                batch = (batch, )
+                batch = (batch,)
 
             keys: Set = set()
             for d in batch:
                 for key in d.keys():
                     if key in keys:
                         raise ValueError(
-                            "Duplicate keys in data dicts not supported!")
+                            "Duplicate keys in data dicts not supported!"
+                        )
                     keys.add(key)
             del keys
 
             bs = check_all_same_length(
-                *flatten([list(d.values()) for d in batch]))
+                *flatten([list(d.values()) for d in batch])
+            )
 
             if train_only and not train:
                 yield batch
 
             flatbatch: DataDict = {
-                k: arr
-                for d in batch for k, arr in d.items()
+                k: arr for d in batch for k, arr in d.items()
             }
             key_to_dix: Dict[str, int] = {
-                k: ix
-                for ix, d in enumerate(batch) for k in d.keys()
+                k: ix for ix, d in enumerate(batch) for k in d.keys()
             }
 
             # by default, apply transformations to all inputs and no labels
@@ -500,7 +516,8 @@ def batch_transformer(
             if out_keys and mode == "each" and inplace and not pop_in_keys:
                 warn(
                     "Using explicit output keys with an inplace function and"
-                    "without popping output keys - data will be duplicated!")
+                    "without popping output keys - data will be duplicated!"
+                )
 
             # if out_keys is not passed, assume they're the same as the in keys
             out_keys = out_keys or in_keys
@@ -515,17 +532,21 @@ def batch_transformer(
                     clean_out_keys.append((key_to_dix[ok], ok))
                 else:
                     if max(key_to_dix.values()) > 1:
-                        warn(f"""
+                        warn(
+                            f"""
                             Output key {ok} is neither an input key nor has an
                             output index. It will be put in the first output
-                            dict.""")
+                            dict."""
+                        )
                     clean_out_keys.append((0, ok))
 
             out_keys = clean_out_keys
 
             if mode == "each" and len(out_keys) != len(in_keys):
-                raise ValueError('In mode "each", the number of out_keys '
-                                 "must equal the number of in_keys")
+                raise ValueError(
+                    'In mode "each", the number of out_keys '
+                    "must equal the number of in_keys"
+                )
 
             if batchwise_apply:
                 if mode == "each":
@@ -550,19 +571,19 @@ def batch_transformer(
                     if mode == "each":
                         first_elems = [f(flatbatch[key][0]) for key in in_keys]
                     elif mode == "mix":
-                        first_elems = f(
-                            *[flatbatch[key][0] for key in in_keys])
+                        first_elems = f(*[flatbatch[key][0] for key in in_keys])
                         if len(first_elems) != len(out_keys):
                             raise ValueError(
                                 f"Transformer function {f} returned "
                                 f"{len(first_elems)} values, but "
                                 f"{len(out_keys)} was expected based on the "
-                                f"output keys {out_keys}.")
+                                f"output keys {out_keys}."
+                            )
                     else:
                         die("unreachable")
 
                     out = [
-                        np.zeros((bs, ) + elem.shape, elem.dtype)
+                        np.zeros((bs,) + elem.shape, elem.dtype)
                         for elem in first_elems
                     ]
                     for outarr, elem in zip(out, first_elems):

@@ -4,16 +4,14 @@ import os.path as osp
 import pickle
 import sys
 import typing as ty
-from collections import defaultdict, namedtuple
-from collections.abc import Mapping, Sequence
+from collections import namedtuple
 from functools import wraps
 from inspect import Parameter, signature
-from time import sleep, time
-from typing import Any, Collection, Dict, List, Optional, Sized, TypeVar
+from typing import Collection, List, Optional, Sized, TypeVar
 
 PrioTup = namedtuple("PrioTup", ("prio", "value"))
 
-T = TypeVar('T')
+T = TypeVar("T")
 
 
 def die(msg, code=-1, debug_locals=None):
@@ -21,6 +19,7 @@ def die(msg, code=-1, debug_locals=None):
     if debug_locals:
         from traceback import print_stack
         from pprint import pprint
+
         print_stack()
         pprint(debug_locals)
     sys.exit(code)
@@ -43,8 +42,7 @@ def ensure_type(obj, t, *args, **kwargs):
         return obj
 
 
-def as_list(obj: Optional[ty.Union[T, List[T], ty.Tuple[T], ty.Set[T]]]
-            ) -> List[T]:
+def as_list(obj: Optional[ty.Union[T, ty.Sequence[T]]]) -> List[T]:
     """
     Coerces the input into a list.
 
@@ -55,12 +53,12 @@ def as_list(obj: Optional[ty.Union[T, List[T], ty.Tuple[T], ty.Set[T]]]
 
     if obj is None:
         return []
-    elif isinstance(obj, (set, tuple)):
-        return list(obj)
     elif isinstance(obj, list):
         return obj
+    elif isinstance(obj, ty.Sequence) and not isinstance(obj, str):
+        return list(obj)
     else:
-        return [obj]
+        return [obj]  # type: ignore
 
 
 def flatten(xs: List[List[T]]) -> List[T]:
@@ -108,7 +106,7 @@ def kwsift(kw, f):
 
 
 def check_all_same_length(
-        *args: Sized, allow_none: bool = False, msg: str = None
+    *args: Sized, allow_none: bool = False, msg: str = None
 ) -> int:
     """
     Checks that all arguments are the same length.  Raises ValueError if
