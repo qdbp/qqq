@@ -43,7 +43,7 @@ setup(
     ext_modules=CX_MODS,
     # requirements
     setup_requires=["numpy"],
-    install_requires=["numpy", "regex"],
+    install_requires=["numpy"],
     extras_require={
         "test": [
             "pytest",
@@ -55,7 +55,7 @@ setup(
             "scikit-learn",
         ],
         "keras": ["keras", "tensorflow", "matplotlib"],
-        "web": ["requests", "lxml", "tldextract"],
+        "web": ["requests", "regex", "lxml", "tldextract"],
         "docs": [
             "sphinx",
             "sphinxcontrib-napoleon",
